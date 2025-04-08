@@ -1,0 +1,820 @@
+└── examples
+    ├── custom_context
+        └── main.go
+    ├── everything
+        └── main.go
+    └── filesystem_stdio_client
+        └── main.go
+
+
+/examples/custom_context/main.go:
+--------------------------------------------------------------------------------
+  1 | package main
+  2 | 
+  3 | import (
+  4 | 	"context"
+  5 | 	"encoding/json"
+  6 | 	"flag"
+  7 | 	"fmt"
+  8 | 	"io"
+  9 | 	"log"
+ 10 | 	"net/http"
+ 11 | 	"os"
+ 12 | 
+ 13 | 	"github.com/mark3labs/mcp-go/mcp"
+ 14 | 	"github.com/mark3labs/mcp-go/server"
+ 15 | )
+ 16 | 
+ 17 | // authKey is a custom context key for storing the auth token.
+ 18 | type authKey struct{}
+ 19 | 
+ 20 | // withAuthKey adds an auth key to the context.
+ 21 | func withAuthKey(ctx context.Context, auth string) context.Context {
+ 22 | 	return context.WithValue(ctx, authKey{}, auth)
+ 23 | }
+ 24 | 
+ 25 | // authFromRequest extracts the auth token from the request headers.
+ 26 | func authFromRequest(ctx context.Context, r *http.Request) context.Context {
+ 27 | 	return withAuthKey(ctx, r.Header.Get("Authorization"))
+ 28 | }
+ 29 | 
+ 30 | // authFromEnv extracts the auth token from the environment
+ 31 | func authFromEnv(ctx context.Context) context.Context {
+ 32 | 	return withAuthKey(ctx, os.Getenv("API_KEY"))
+ 33 | }
+ 34 | 
+ 35 | // tokenFromContext extracts the auth token from the context.
+ 36 | // This can be used by tools to extract the token regardless of the
+ 37 | // transport being used by the server.
+ 38 | func tokenFromContext(ctx context.Context) (string, error) {
+ 39 | 	auth, ok := ctx.Value(authKey{}).(string)
+ 40 | 	if !ok {
+ 41 | 		return "", fmt.Errorf("missing auth")
+ 42 | 	}
+ 43 | 	return auth, nil
+ 44 | }
+ 45 | 
+ 46 | type response struct {
+ 47 | 	Args    map[string]interface{} `json:"args"`
+ 48 | 	Headers map[string]string      `json:"headers"`
+ 49 | }
+ 50 | 
+ 51 | // makeRequest makes a request to httpbin.org including the auth token in the request
+ 52 | // headers and the message in the query string.
+ 53 | func makeRequest(ctx context.Context, message, token string) (*response, error) {
+ 54 | 	req, err := http.NewRequestWithContext(ctx, "GET", "https://httpbin.org/anything", nil)
+ 55 | 	if err != nil {
+ 56 | 		return nil, err
+ 57 | 	}
+ 58 | 	req.Header.Set("Authorization", token)
+ 59 | 	query := req.URL.Query()
+ 60 | 	query.Add("message", message)
+ 61 | 	req.URL.RawQuery = query.Encode()
+ 62 | 	resp, err := http.DefaultClient.Do(req)
+ 63 | 	if err != nil {
+ 64 | 		return nil, err
+ 65 | 	}
+ 66 | 	defer resp.Body.Close()
+ 67 | 	body, err := io.ReadAll(resp.Body)
+ 68 | 	if err != nil {
+ 69 | 		return nil, err
+ 70 | 	}
+ 71 | 	var r *response
+ 72 | 	if err := json.Unmarshal(body, &r); err != nil {
+ 73 | 		return nil, err
+ 74 | 	}
+ 75 | 	return r, nil
+ 76 | }
+ 77 | 
+ 78 | // handleMakeAuthenticatedRequestTool is a tool that makes an authenticated request
+ 79 | // using the token from the context.
+ 80 | func handleMakeAuthenticatedRequestTool(
+ 81 | 	ctx context.Context,
+ 82 | 	request mcp.CallToolRequest,
+ 83 | ) (*mcp.CallToolResult, error) {
+ 84 | 	message, ok := request.Params.Arguments["message"].(string)
+ 85 | 	if !ok {
+ 86 | 		return nil, fmt.Errorf("missing message")
+ 87 | 	}
+ 88 | 	token, err := tokenFromContext(ctx)
+ 89 | 	if err != nil {
+ 90 | 		return nil, fmt.Errorf("missing token: %v", err)
+ 91 | 	}
+ 92 | 	// Now our tool can make a request with the token, irrespective of where it came from.
+ 93 | 	resp, err := makeRequest(ctx, message, token)
+ 94 | 	if err != nil {
+ 95 | 		return nil, err
+ 96 | 	}
+ 97 | 	return mcp.NewToolResultText(fmt.Sprintf("%+v", resp)), nil
+ 98 | }
+ 99 | 
+100 | type MCPServer struct {
+101 | 	server *server.MCPServer
+102 | }
+103 | 
+104 | func NewMCPServer() *MCPServer {
+105 | 	mcpServer := server.NewMCPServer(
+106 | 		"example-server",
+107 | 		"1.0.0",
+108 | 		server.WithResourceCapabilities(true, true),
+109 | 		server.WithPromptCapabilities(true),
+110 | 		server.WithToolCapabilities(true),
+111 | 	)
+112 | 	mcpServer.AddTool(mcp.NewTool("make_authenticated_request",
+113 | 		mcp.WithDescription("Makes an authenticated request"),
+114 | 		mcp.WithString("message",
+115 | 			mcp.Description("Message to echo"),
+116 | 			mcp.Required(),
+117 | 		),
+118 | 	), handleMakeAuthenticatedRequestTool)
+119 | 
+120 | 	return &MCPServer{
+121 | 		server: mcpServer,
+122 | 	}
+123 | }
+124 | 
+125 | func (s *MCPServer) ServeSSE(addr string) *server.SSEServer {
+126 | 	return server.NewSSEServer(s.server,
+127 | 		server.WithBaseURL(fmt.Sprintf("http://%s", addr)),
+128 | 		server.WithSSEContextFunc(authFromRequest),
+129 | 	)
+130 | }
+131 | 
+132 | func (s *MCPServer) ServeStdio() error {
+133 | 	return server.ServeStdio(s.server, server.WithStdioContextFunc(authFromEnv))
+134 | }
+135 | 
+136 | func main() {
+137 | 	var transport string
+138 | 	flag.StringVar(&transport, "t", "stdio", "Transport type (stdio or sse)")
+139 | 	flag.StringVar(
+140 | 		&transport,
+141 | 		"transport",
+142 | 		"stdio",
+143 | 		"Transport type (stdio or sse)",
+144 | 	)
+145 | 	flag.Parse()
+146 | 
+147 | 	s := NewMCPServer()
+148 | 
+149 | 	switch transport {
+150 | 	case "stdio":
+151 | 		if err := s.ServeStdio(); err != nil {
+152 | 			log.Fatalf("Server error: %v", err)
+153 | 		}
+154 | 	case "sse":
+155 | 		sseServer := s.ServeSSE("localhost:8080")
+156 | 		log.Printf("SSE server listening on :8080")
+157 | 		if err := sseServer.Start(":8080"); err != nil {
+158 | 			log.Fatalf("Server error: %v", err)
+159 | 		}
+160 | 	default:
+161 | 		log.Fatalf(
+162 | 			"Invalid transport type: %s. Must be 'stdio' or 'sse'",
+163 | 			transport,
+164 | 		)
+165 | 	}
+166 | }
+167 | 
+
+
+--------------------------------------------------------------------------------
+/examples/everything/main.go:
+--------------------------------------------------------------------------------
+  1 | package main
+  2 | 
+  3 | import (
+  4 | 	"context"
+  5 | 	"flag"
+  6 | 	"fmt"
+  7 | 	"log"
+  8 | 	"time"
+  9 | 
+ 10 | 	"github.com/mark3labs/mcp-go/mcp"
+ 11 | 	"github.com/mark3labs/mcp-go/server"
+ 12 | )
+ 13 | 
+ 14 | type ToolName string
+ 15 | 
+ 16 | const (
+ 17 | 	ECHO                   ToolName = "echo"
+ 18 | 	ADD                    ToolName = "add"
+ 19 | 	LONG_RUNNING_OPERATION ToolName = "longRunningOperation"
+ 20 | 	SAMPLE_LLM             ToolName = "sampleLLM"
+ 21 | 	GET_TINY_IMAGE         ToolName = "getTinyImage"
+ 22 | )
+ 23 | 
+ 24 | type PromptName string
+ 25 | 
+ 26 | const (
+ 27 | 	SIMPLE  PromptName = "simple_prompt"
+ 28 | 	COMPLEX PromptName = "complex_prompt"
+ 29 | )
+ 30 | 
+ 31 | func NewMCPServer() *server.MCPServer {
+ 32 | 
+ 33 | 	hooks := &server.Hooks{}
+ 34 | 
+ 35 | 	hooks.AddBeforeAny(func(ctx context.Context, id any, method mcp.MCPMethod, message any) {
+ 36 | 		fmt.Printf("beforeAny: %s, %v, %v\n", method, id, message)
+ 37 | 	})
+ 38 | 	hooks.AddOnSuccess(func(ctx context.Context, id any, method mcp.MCPMethod, message any, result any) {
+ 39 | 		fmt.Printf("onSuccess: %s, %v, %v, %v\n", method, id, message, result)
+ 40 | 	})
+ 41 | 	hooks.AddOnError(func(ctx context.Context, id any, method mcp.MCPMethod, message any, err error) {
+ 42 | 		fmt.Printf("onError: %s, %v, %v, %v\n", method, id, message, err)
+ 43 | 	})
+ 44 | 	hooks.AddBeforeInitialize(func(ctx context.Context, id any, message *mcp.InitializeRequest) {
+ 45 | 		fmt.Printf("beforeInitialize: %v, %v\n", id, message)
+ 46 | 	})
+ 47 | 	hooks.AddAfterInitialize(func(ctx context.Context, id any, message *mcp.InitializeRequest, result *mcp.InitializeResult) {
+ 48 | 		fmt.Printf("afterInitialize: %v, %v, %v\n", id, message, result)
+ 49 | 	})
+ 50 | 	hooks.AddAfterCallTool(func(ctx context.Context, id any, message *mcp.CallToolRequest, result *mcp.CallToolResult) {
+ 51 | 		fmt.Printf("afterCallTool: %v, %v, %v\n", id, message, result)
+ 52 | 	})
+ 53 | 	hooks.AddBeforeCallTool(func(ctx context.Context, id any, message *mcp.CallToolRequest) {
+ 54 | 		fmt.Printf("beforeCallTool: %v, %v\n", id, message)
+ 55 | 	})
+ 56 | 
+ 57 | 	mcpServer := server.NewMCPServer(
+ 58 | 		"example-servers/everything",
+ 59 | 		"1.0.0",
+ 60 | 		server.WithResourceCapabilities(true, true),
+ 61 | 		server.WithPromptCapabilities(true),
+ 62 | 		server.WithLogging(),
+ 63 | 		server.WithHooks(hooks),
+ 64 | 	)
+ 65 | 
+ 66 | 	mcpServer.AddResource(mcp.NewResource("test://static/resource",
+ 67 | 		"Static Resource",
+ 68 | 		mcp.WithMIMEType("text/plain"),
+ 69 | 	), handleReadResource)
+ 70 | 	mcpServer.AddResourceTemplate(
+ 71 | 		mcp.NewResourceTemplate(
+ 72 | 			"test://dynamic/resource/{id}",
+ 73 | 			"Dynamic Resource",
+ 74 | 		),
+ 75 | 		handleResourceTemplate,
+ 76 | 	)
+ 77 | 	mcpServer.AddPrompt(mcp.NewPrompt(string(SIMPLE),
+ 78 | 		mcp.WithPromptDescription("A simple prompt"),
+ 79 | 	), handleSimplePrompt)
+ 80 | 	mcpServer.AddPrompt(mcp.NewPrompt(string(COMPLEX),
+ 81 | 		mcp.WithPromptDescription("A complex prompt"),
+ 82 | 		mcp.WithArgument("temperature",
+ 83 | 			mcp.ArgumentDescription("The temperature parameter for generation"),
+ 84 | 			mcp.RequiredArgument(),
+ 85 | 		),
+ 86 | 		mcp.WithArgument("style",
+ 87 | 			mcp.ArgumentDescription("The style to use for the response"),
+ 88 | 			mcp.RequiredArgument(),
+ 89 | 		),
+ 90 | 	), handleComplexPrompt)
+ 91 | 	mcpServer.AddTool(mcp.NewTool(string(ECHO),
+ 92 | 		mcp.WithDescription("Echoes back the input"),
+ 93 | 		mcp.WithString("message",
+ 94 | 			mcp.Description("Message to echo"),
+ 95 | 			mcp.Required(),
+ 96 | 		),
+ 97 | 	), handleEchoTool)
+ 98 | 
+ 99 | 	mcpServer.AddTool(
+100 | 		mcp.NewTool("notify"),
+101 | 		handleSendNotification,
+102 | 	)
+103 | 
+104 | 	mcpServer.AddTool(mcp.NewTool(string(ADD),
+105 | 		mcp.WithDescription("Adds two numbers"),
+106 | 		mcp.WithNumber("a",
+107 | 			mcp.Description("First number"),
+108 | 			mcp.Required(),
+109 | 		),
+110 | 		mcp.WithNumber("b",
+111 | 			mcp.Description("Second number"),
+112 | 			mcp.Required(),
+113 | 		),
+114 | 	), handleAddTool)
+115 | 	mcpServer.AddTool(mcp.NewTool(
+116 | 		string(LONG_RUNNING_OPERATION),
+117 | 		mcp.WithDescription(
+118 | 			"Demonstrates a long running operation with progress updates",
+119 | 		),
+120 | 		mcp.WithNumber("duration",
+121 | 			mcp.Description("Duration of the operation in seconds"),
+122 | 			mcp.DefaultNumber(10),
+123 | 		),
+124 | 		mcp.WithNumber("steps",
+125 | 			mcp.Description("Number of steps in the operation"),
+126 | 			mcp.DefaultNumber(5),
+127 | 		),
+128 | 	), handleLongRunningOperationTool)
+129 | 
+130 | 	// s.server.AddTool(mcp.Tool{
+131 | 	// 	Name:        string(SAMPLE_LLM),
+132 | 	// 	Description: "Samples from an LLM using MCP's sampling feature",
+133 | 	// 	InputSchema: mcp.ToolInputSchema{
+134 | 	// 		Type: "object",
+135 | 	// 		Properties: map[string]interface{}{
+136 | 	// 			"prompt": map[string]interface{}{
+137 | 	// 				"type":        "string",
+138 | 	// 				"description": "The prompt to send to the LLM",
+139 | 	// 			},
+140 | 	// 			"maxTokens": map[string]interface{}{
+141 | 	// 				"type":        "number",
+142 | 	// 				"description": "Maximum number of tokens to generate",
+143 | 	// 				"default":     100,
+144 | 	// 			},
+145 | 	// 		},
+146 | 	// 	},
+147 | 	// }, s.handleSampleLLMTool)
+148 | 	mcpServer.AddTool(mcp.NewTool(string(GET_TINY_IMAGE),
+149 | 		mcp.WithDescription("Returns the MCP_TINY_IMAGE"),
+150 | 	), handleGetTinyImageTool)
+151 | 
+152 | 	mcpServer.AddNotificationHandler("notification", handleNotification)
+153 | 
+154 | 	return mcpServer
+155 | }
+156 | 
+157 | func generateResources() []mcp.Resource {
+158 | 	resources := make([]mcp.Resource, 100)
+159 | 	for i := 0; i < 100; i++ {
+160 | 		uri := fmt.Sprintf("test://static/resource/%d", i+1)
+161 | 		if i%2 == 0 {
+162 | 			resources[i] = mcp.Resource{
+163 | 				URI:      uri,
+164 | 				Name:     fmt.Sprintf("Resource %d", i+1),
+165 | 				MIMEType: "text/plain",
+166 | 			}
+167 | 		} else {
+168 | 			resources[i] = mcp.Resource{
+169 | 				URI:      uri,
+170 | 				Name:     fmt.Sprintf("Resource %d", i+1),
+171 | 				MIMEType: "application/octet-stream",
+172 | 			}
+173 | 		}
+174 | 	}
+175 | 	return resources
+176 | }
+177 | 
+178 | func runUpdateInterval() {
+179 | 	// for range s.updateTicker.C {
+180 | 	// 	for uri := range s.subscriptions {
+181 | 	// 		s.server.HandleMessage(
+182 | 	// 			context.Background(),
+183 | 	// 			mcp.JSONRPCNotification{
+184 | 	// 				JSONRPC: mcp.JSONRPC_VERSION,
+185 | 	// 				Notification: mcp.Notification{
+186 | 	// 					Method: "resources/updated",
+187 | 	// 					Params: struct {
+188 | 	// 						Meta map[string]interface{} `json:"_meta,omitempty"`
+189 | 	// 					}{
+190 | 	// 						Meta: map[string]interface{}{"uri": uri},
+191 | 	// 					},
+192 | 	// 				},
+193 | 	// 			},
+194 | 	// 		)
+195 | 	// 	}
+196 | 	// }
+197 | }
+198 | 
+199 | func handleReadResource(
+200 | 	ctx context.Context,
+201 | 	request mcp.ReadResourceRequest,
+202 | ) ([]mcp.ResourceContents, error) {
+203 | 	return []mcp.ResourceContents{
+204 | 		mcp.TextResourceContents{
+205 | 			URI:      "test://static/resource",
+206 | 			MIMEType: "text/plain",
+207 | 			Text:     "This is a sample resource",
+208 | 		},
+209 | 	}, nil
+210 | }
+211 | 
+212 | func handleResourceTemplate(
+213 | 	ctx context.Context,
+214 | 	request mcp.ReadResourceRequest,
+215 | ) ([]mcp.ResourceContents, error) {
+216 | 	return []mcp.ResourceContents{
+217 | 		mcp.TextResourceContents{
+218 | 			URI:      request.Params.URI,
+219 | 			MIMEType: "text/plain",
+220 | 			Text:     "This is a sample resource",
+221 | 		},
+222 | 	}, nil
+223 | }
+224 | 
+225 | func handleSimplePrompt(
+226 | 	ctx context.Context,
+227 | 	request mcp.GetPromptRequest,
+228 | ) (*mcp.GetPromptResult, error) {
+229 | 	return &mcp.GetPromptResult{
+230 | 		Description: "A simple prompt without arguments",
+231 | 		Messages: []mcp.PromptMessage{
+232 | 			{
+233 | 				Role: mcp.RoleUser,
+234 | 				Content: mcp.TextContent{
+235 | 					Type: "text",
+236 | 					Text: "This is a simple prompt without arguments.",
+237 | 				},
+238 | 			},
+239 | 		},
+240 | 	}, nil
+241 | }
+242 | 
+243 | func handleComplexPrompt(
+244 | 	ctx context.Context,
+245 | 	request mcp.GetPromptRequest,
+246 | ) (*mcp.GetPromptResult, error) {
+247 | 	arguments := request.Params.Arguments
+248 | 	return &mcp.GetPromptResult{
+249 | 		Description: "A complex prompt with arguments",
+250 | 		Messages: []mcp.PromptMessage{
+251 | 			{
+252 | 				Role: mcp.RoleUser,
+253 | 				Content: mcp.TextContent{
+254 | 					Type: "text",
+255 | 					Text: fmt.Sprintf(
+256 | 						"This is a complex prompt with arguments: temperature=%s, style=%s",
+257 | 						arguments["temperature"],
+258 | 						arguments["style"],
+259 | 					),
+260 | 				},
+261 | 			},
+262 | 			{
+263 | 				Role: mcp.RoleAssistant,
+264 | 				Content: mcp.TextContent{
+265 | 					Type: "text",
+266 | 					Text: "I understand. You've provided a complex prompt with temperature and style arguments. How would you like me to proceed?",
+267 | 				},
+268 | 			},
+269 | 			{
+270 | 				Role: mcp.RoleUser,
+271 | 				Content: mcp.ImageContent{
+272 | 					Type:     "image",
+273 | 					Data:     MCP_TINY_IMAGE,
+274 | 					MIMEType: "image/png",
+275 | 				},
+276 | 			},
+277 | 		},
+278 | 	}, nil
+279 | }
+280 | 
+281 | func handleEchoTool(
+282 | 	ctx context.Context,
+283 | 	request mcp.CallToolRequest,
+284 | ) (*mcp.CallToolResult, error) {
+285 | 	arguments := request.Params.Arguments
+286 | 	message, ok := arguments["message"].(string)
+287 | 	if !ok {
+288 | 		return nil, fmt.Errorf("invalid message argument")
+289 | 	}
+290 | 	return &mcp.CallToolResult{
+291 | 		Content: []mcp.Content{
+292 | 			mcp.TextContent{
+293 | 				Type: "text",
+294 | 				Text: fmt.Sprintf("Echo: %s", message),
+295 | 			},
+296 | 		},
+297 | 	}, nil
+298 | }
+299 | 
+300 | func handleAddTool(
+301 | 	ctx context.Context,
+302 | 	request mcp.CallToolRequest,
+303 | ) (*mcp.CallToolResult, error) {
+304 | 	arguments := request.Params.Arguments
+305 | 	a, ok1 := arguments["a"].(float64)
+306 | 	b, ok2 := arguments["b"].(float64)
+307 | 	if !ok1 || !ok2 {
+308 | 		return nil, fmt.Errorf("invalid number arguments")
+309 | 	}
+310 | 	sum := a + b
+311 | 	return &mcp.CallToolResult{
+312 | 		Content: []mcp.Content{
+313 | 			mcp.TextContent{
+314 | 				Type: "text",
+315 | 				Text: fmt.Sprintf("The sum of %f and %f is %f.", a, b, sum),
+316 | 			},
+317 | 		},
+318 | 	}, nil
+319 | }
+320 | 
+321 | func handleSendNotification(
+322 | 	ctx context.Context,
+323 | 	request mcp.CallToolRequest,
+324 | ) (*mcp.CallToolResult, error) {
+325 | 
+326 | 	server := server.ServerFromContext(ctx)
+327 | 
+328 | 	err := server.SendNotificationToClient(
+329 | 		ctx,
+330 | 		"notifications/progress",
+331 | 		map[string]interface{}{
+332 | 			"progress":      10,
+333 | 			"total":         10,
+334 | 			"progressToken": 0,
+335 | 		},
+336 | 	)
+337 | 	if err != nil {
+338 | 		return nil, fmt.Errorf("failed to send notification: %w", err)
+339 | 	}
+340 | 
+341 | 	return &mcp.CallToolResult{
+342 | 		Content: []mcp.Content{
+343 | 			mcp.TextContent{
+344 | 				Type: "text",
+345 | 				Text: "notification sent successfully",
+346 | 			},
+347 | 		},
+348 | 	}, nil
+349 | }
+350 | 
+351 | func handleLongRunningOperationTool(
+352 | 	ctx context.Context,
+353 | 	request mcp.CallToolRequest,
+354 | ) (*mcp.CallToolResult, error) {
+355 | 	arguments := request.Params.Arguments
+356 | 	progressToken := request.Params.Meta.ProgressToken
+357 | 	duration, _ := arguments["duration"].(float64)
+358 | 	steps, _ := arguments["steps"].(float64)
+359 | 	stepDuration := duration / steps
+360 | 	server := server.ServerFromContext(ctx)
+361 | 
+362 | 	for i := 1; i < int(steps)+1; i++ {
+363 | 		time.Sleep(time.Duration(stepDuration * float64(time.Second)))
+364 | 		if progressToken != nil {
+365 | 			server.SendNotificationToClient(
+366 | 				ctx,
+367 | 				"notifications/progress",
+368 | 				map[string]interface{}{
+369 | 					"progress":      i,
+370 | 					"total":         int(steps),
+371 | 					"progressToken": progressToken,
+372 | 				},
+373 | 			)
+374 | 		}
+375 | 	}
+376 | 
+377 | 	return &mcp.CallToolResult{
+378 | 		Content: []mcp.Content{
+379 | 			mcp.TextContent{
+380 | 				Type: "text",
+381 | 				Text: fmt.Sprintf(
+382 | 					"Long running operation completed. Duration: %f seconds, Steps: %d.",
+383 | 					duration,
+384 | 					int(steps),
+385 | 				),
+386 | 			},
+387 | 		},
+388 | 	}, nil
+389 | }
+390 | 
+391 | // func (s *MCPServer) handleSampleLLMTool(arguments map[string]interface{}) (*mcp.CallToolResult, error) {
+392 | // 	prompt, _ := arguments["prompt"].(string)
+393 | // 	maxTokens, _ := arguments["maxTokens"].(float64)
+394 | 
+395 | // 	// This is a mock implementation. In a real scenario, you would use the server's RequestSampling method.
+396 | // 	result := fmt.Sprintf(
+397 | // 		"Sample LLM result for prompt: '%s' (max tokens: %d)",
+398 | // 		prompt,
+399 | // 		int(maxTokens),
+400 | // 	)
+401 | 
+402 | // 	return &mcp.CallToolResult{
+403 | // 		Content: []interface{}{
+404 | // 			mcp.TextContent{
+405 | // 				Type: "text",
+406 | // 				Text: fmt.Sprintf("LLM sampling result: %s", result),
+407 | // 			},
+408 | // 		},
+409 | // 	}, nil
+410 | // }
+411 | 
+412 | func handleGetTinyImageTool(
+413 | 	ctx context.Context,
+414 | 	request mcp.CallToolRequest,
+415 | ) (*mcp.CallToolResult, error) {
+416 | 	return &mcp.CallToolResult{
+417 | 		Content: []mcp.Content{
+418 | 			mcp.TextContent{
+419 | 				Type: "text",
+420 | 				Text: "This is a tiny image:",
+421 | 			},
+422 | 			mcp.ImageContent{
+423 | 				Type:     "image",
+424 | 				Data:     MCP_TINY_IMAGE,
+425 | 				MIMEType: "image/png",
+426 | 			},
+427 | 			mcp.TextContent{
+428 | 				Type: "text",
+429 | 				Text: "The image above is the MCP tiny image.",
+430 | 			},
+431 | 		},
+432 | 	}, nil
+433 | }
+434 | 
+435 | func handleNotification(
+436 | 	ctx context.Context,
+437 | 	notification mcp.JSONRPCNotification,
+438 | ) {
+439 | 	log.Printf("Received notification: %s", notification.Method)
+440 | }
+441 | 
+442 | func main() {
+443 | 	var transport string
+444 | 	flag.StringVar(&transport, "t", "stdio", "Transport type (stdio or sse)")
+445 | 	flag.StringVar(&transport, "transport", "stdio", "Transport type (stdio or sse)")
+446 | 	flag.Parse()
+447 | 
+448 | 	mcpServer := NewMCPServer()
+449 | 
+450 | 	// Only check for "sse" since stdio is the default
+451 | 	if transport == "sse" {
+452 | 		sseServer := server.NewSSEServer(mcpServer, server.WithBaseURL("http://localhost:8080"))
+453 | 		log.Printf("SSE server listening on :8080")
+454 | 		if err := sseServer.Start(":8080"); err != nil {
+455 | 			log.Fatalf("Server error: %v", err)
+456 | 		}
+457 | 	} else {
+458 | 		if err := server.ServeStdio(mcpServer); err != nil {
+459 | 			log.Fatalf("Server error: %v", err)
+460 | 		}
+461 | 	}
+462 | }
+463 | 
+464 | const MCP_TINY_IMAGE = "iVBORw0KGgoAAAANSUhEUgAAARgAAAEYCAIAAAAI7H7bAAAZyUlEQVR4nOzce1RVZd4H8MM5BwERQUDxQpCoI0RajDWjomSEkOaltDBvaaIVy5aJltNkadkSdXJoWs6IKZko6bh0aABXxDTCKFgwgwalOKCICiJyEY7cz+Fw3rV63nnWb/a5eNSfWNP389fZt2dvNvu797Of5zlHazKZVABwZ9T3+gAA/hcgSAAMECQABggSAAMECYABggTAAEECYIAgATBAkAAYIEgADBAkAAYIEgADBAmAAYIEwABBAmCAIAEwQJAAGCBIAAwQJAAGCBIAAwQJgAGCBMAAQQJggCABMECQABggSAAMECQABggSAAMECYABggTAAEECYIAgATBAkAAYIEgADBAkAAYIEgADBAmAAYIEwABBAmCAIAEwQJAAGCBIAAwQJAAGCBIAAwQJgAGCBMAAQQJggCABMECQABggSAAMECQABggSAAMECYABggTAAEECYIAgATBAkAAYIEgADBAkAAYIEgADBAmAAYIEwABBAmCAIAEwQJAAGCBIAAwQJAAGCBIAAwQJgAGCBMAAQQJggCABMECQABggSAAMECQABggSAAMECYABggTAAEECYIAgATBAkAAYIEgADBAkAAYIEgADBAmAAYIEwABBAmCAIAEwQJAAGCBIAAwQJAAGCBIAAwQJgAGCBMAAQQJggCABMECQABggSAAMECQABggSAAMECYABggTAAEECYIAgATBAkAAYIEgADBAkAAYIEgADBAmAAYIEwABBAmCAIAEwQJAAGCBIAAwQJAAGCBIAAwQJgAGCBMAAQQJggCABMECQABho7/UBwM9L9w9M/43OkZ/FyhaXqlQqOp+uJrYy/qCrq0t87urqMhqN3d3dKpWq6wdiUi7t6uoSJZhvJRaZTCYxKTY0Go0eHh7Lly/v06eP+LsQpJ8vcZUYDAb9D8SFJSfF5SU+GwwGcQnq/0NuaDAYxIaKRWKp0Wg0mUzyYqUXrtFoFBe9nJRXv7hY5YaKRWJDOikS0pO8vLwyMzNlin56QZJ3I4vzzT/f6srimuj6D/n/MxgM8o5lMBjkZSEW0f863Zbe6hRligLpYciixFJ6uSgORnH7VCxSXLt0qVikOI2KU2r/pO01/1e5uLjMmzfv9ddfDwwMpPNvEiSDwXD06FHxH6VPUvn0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2rVrtPNq4MCB1tqIc3Nzb+Xf/l/i4uIslqnoJzhz5gz9lgSvkJAQnU73u9/97uDBg6J6cuzYsfj4+NWrV+fk5BQVFcmjio+PF52tPj4+u3btMr9a7om7HqScnBxaSTPvWBDkqIIDBw6YL1X8uMK6deto/dDZ2dnaaOIvv/ySbrh79276ew/+/v4Wt1L0HcfGxup0OtpTPm/ePIsbKrpEXVxcTp8+be3MKL4PsmTJkhMnTtBOgtDQ0JaWFtoxOnbsWGulKb6Lbj+tViu/fqeg+GJlSkqK4jnMZfTo0eIYXnrppdLS0uLiYrVaffXq1V//+tfiZwLE92EbGhrEC3avXr0WLFhAv3B5z931xgbR2iM+9+nTZ9y4cRZXmzJlimg8ffrpp82XKt6RCgoK6IDr8PBwa+PKFJX4oqIi2ixm7UdU5s6dS4cL7dmzp6SkhDbjWvyJQJVK9eSTT7722mtysr29feHChdaGOSve1oYOHXr+/HnaRPHwww8rvvwTFBRksSgxtMzaItvmzZtn8Yux5iNNs7KybPzy220QnXjbt28/ceKEOIby8vIPP/xQ9G5t3LgxODj4hRdeWLx4cUVFRV5e3iOPPPLVV1+99dZbpaWl+/btszik61656z/HJX6G9/935uBgrQ1H/OipWq221tZko3NGo9FYexURdUs5qVar6ZVqY3ei7VhOarVag8EgH61ardbar+SIn8+mc6z15yjWFH8CbZURe+no6JD7tfGX0vN8S+w/ew4ODFeLqDzLv06j0dCHsDjtckdardZoNDo4OOTm5s6YMaO1tfXw4cOzZ8++w2O4G/C7dvCj1tbW9u67737wwQdBQUFbt26dOnXqvT4iy35iP6IPPysVFRXR0dFarTYtLS0iIsLen5i7F36SP+oNPwepqamRkZELFiz45ptvZsyY8WNOEZ5I8GOUn58fFxcXGBiYl5d3S1/av4fwjgQ/LhcvXoyIiNi/f/89Gelz2/BEgh+XwsLCo0ePKoa//PjhiQTAAI0NAAwQJAAGCBIAAwQJgAGCBMAAQQJggCABMECQABggSAAMECQABggSAAMECYABggTAAEECYIAgATBAkAAYIEgADBAkAAYIEgADBAmAAYIEwABBAmCAIAEwQJAAGCBIAAwQJAAGCBIAAwQJgAGCBMAAQQJggCABMECQABggSAAMECQABggSAAMECYABggTAAEECYIAgATBAkAAYIEgADBAkAAYIEgADBAmAAYIEwABBAmCAIAEwQJAAGCBIAAwQJAAGCBIAAwQJgAGCBMAAQQJggCABMECQABggSAAMECQABggSAAMECYABggTAAEECYIAgATBAkAAYIEgADBAkAAYIEgADBAmAAYIEwABBAmCAIAEwQJAAGCBIAAwQJAAGCBIAAwQJgAGCBMAAQQJggCABMECQABggSAAMECQABggSAAMECYABggTAAEECYIAgATBAkAAYIEgADBAkAAYIEgADBAmAAYIEwABBAmCAIAEwQJAAGCBIAAwQJAAGCBIAAwQJgAGCBMAAQQJggCABMECQABggSAAMECQABggSAAMECYABggTAAEECYIAgATBAkAAYIEgADBAkAAYIEgADBAmAAYIEwABBAmCAIAEwQJAAGCBIAAz+LwAA///FzJto8JNVBwAAAABJRU5ErkJggg=="
+465 | 
+
+
+--------------------------------------------------------------------------------
+/examples/filesystem_stdio_client/main.go:
+--------------------------------------------------------------------------------
+  1 | package main
+  2 | 
+  3 | import (
+  4 | 	"context"
+  5 | 	"encoding/json"
+  6 | 	"fmt"
+  7 | 	"log"
+  8 | 	"time"
+  9 | 
+ 10 | 	"github.com/mark3labs/mcp-go/client"
+ 11 | 	"github.com/mark3labs/mcp-go/mcp"
+ 12 | )
+ 13 | 
+ 14 | func main() {
+ 15 | 	c, err := client.NewStdioMCPClient(
+ 16 | 		"npx",
+ 17 | 		[]string{}, // Empty ENV
+ 18 | 		"-y",
+ 19 | 		"@modelcontextprotocol/server-filesystem",
+ 20 | 		"/tmp",
+ 21 | 	)
+ 22 | 	if err != nil {
+ 23 | 		log.Fatalf("Failed to create client: %v", err)
+ 24 | 	}
+ 25 | 	defer c.Close()
+ 26 | 
+ 27 | 	// Create context with timeout
+ 28 | 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+ 29 | 	defer cancel()
+ 30 | 
+ 31 | 	// Initialize the client
+ 32 | 	fmt.Println("Initializing client...")
+ 33 | 	initRequest := mcp.InitializeRequest{}
+ 34 | 	initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+ 35 | 	initRequest.Params.ClientInfo = mcp.Implementation{
+ 36 | 		Name:    "example-client",
+ 37 | 		Version: "1.0.0",
+ 38 | 	}
+ 39 | 
+ 40 | 	initResult, err := c.Initialize(ctx, initRequest)
+ 41 | 	if err != nil {
+ 42 | 		log.Fatalf("Failed to initialize: %v", err)
+ 43 | 	}
+ 44 | 	fmt.Printf(
+ 45 | 		"Initialized with server: %s %s\n\n",
+ 46 | 		initResult.ServerInfo.Name,
+ 47 | 		initResult.ServerInfo.Version,
+ 48 | 	)
+ 49 | 
+ 50 | 	// List Tools
+ 51 | 	fmt.Println("Listing available tools...")
+ 52 | 	toolsRequest := mcp.ListToolsRequest{}
+ 53 | 	tools, err := c.ListTools(ctx, toolsRequest)
+ 54 | 	if err != nil {
+ 55 | 		log.Fatalf("Failed to list tools: %v", err)
+ 56 | 	}
+ 57 | 	for _, tool := range tools.Tools {
+ 58 | 		fmt.Printf("- %s: %s\n", tool.Name, tool.Description)
+ 59 | 	}
+ 60 | 	fmt.Println()
+ 61 | 
+ 62 | 	// List allowed directories
+ 63 | 	fmt.Println("Listing allowed directories...")
+ 64 | 	listDirRequest := mcp.CallToolRequest{
+ 65 | 		Request: mcp.Request{
+ 66 | 			Method: "tools/call",
+ 67 | 		},
+ 68 | 	}
+ 69 | 	listDirRequest.Params.Name = "list_allowed_directories"
+ 70 | 
+ 71 | 	result, err := c.CallTool(ctx, listDirRequest)
+ 72 | 	if err != nil {
+ 73 | 		log.Fatalf("Failed to list allowed directories: %v", err)
+ 74 | 	}
+ 75 | 	printToolResult(result)
+ 76 | 	fmt.Println()
+ 77 | 
+ 78 | 	// List /tmp
+ 79 | 	fmt.Println("Listing /tmp directory...")
+ 80 | 	listTmpRequest := mcp.CallToolRequest{}
+ 81 | 	listTmpRequest.Params.Name = "list_directory"
+ 82 | 	listTmpRequest.Params.Arguments = map[string]interface{}{
+ 83 | 		"path": "/tmp",
+ 84 | 	}
+ 85 | 
+ 86 | 	result, err = c.CallTool(ctx, listTmpRequest)
+ 87 | 	if err != nil {
+ 88 | 		log.Fatalf("Failed to list directory: %v", err)
+ 89 | 	}
+ 90 | 	printToolResult(result)
+ 91 | 	fmt.Println()
+ 92 | 
+ 93 | 	// Create mcp directory
+ 94 | 	fmt.Println("Creating /tmp/mcp directory...")
+ 95 | 	createDirRequest := mcp.CallToolRequest{}
+ 96 | 	createDirRequest.Params.Name = "create_directory"
+ 97 | 	createDirRequest.Params.Arguments = map[string]interface{}{
+ 98 | 		"path": "/tmp/mcp",
+ 99 | 	}
+100 | 
+101 | 	result, err = c.CallTool(ctx, createDirRequest)
+102 | 	if err != nil {
+103 | 		log.Fatalf("Failed to create directory: %v", err)
+104 | 	}
+105 | 	printToolResult(result)
+106 | 	fmt.Println()
+107 | 
+108 | 	// Create hello.txt
+109 | 	fmt.Println("Creating /tmp/mcp/hello.txt...")
+110 | 	writeFileRequest := mcp.CallToolRequest{}
+111 | 	writeFileRequest.Params.Name = "write_file"
+112 | 	writeFileRequest.Params.Arguments = map[string]interface{}{
+113 | 		"path":    "/tmp/mcp/hello.txt",
+114 | 		"content": "Hello World",
+115 | 	}
+116 | 
+117 | 	result, err = c.CallTool(ctx, writeFileRequest)
+118 | 	if err != nil {
+119 | 		log.Fatalf("Failed to create file: %v", err)
+120 | 	}
+121 | 	printToolResult(result)
+122 | 	fmt.Println()
+123 | 
+124 | 	// Verify file contents
+125 | 	fmt.Println("Reading /tmp/mcp/hello.txt...")
+126 | 	readFileRequest := mcp.CallToolRequest{}
+127 | 	readFileRequest.Params.Name = "read_file"
+128 | 	readFileRequest.Params.Arguments = map[string]interface{}{
+129 | 		"path": "/tmp/mcp/hello.txt",
+130 | 	}
+131 | 
+132 | 	result, err = c.CallTool(ctx, readFileRequest)
+133 | 	if err != nil {
+134 | 		log.Fatalf("Failed to read file: %v", err)
+135 | 	}
+136 | 	printToolResult(result)
+137 | 
+138 | 	// Get file info
+139 | 	fmt.Println("Getting info for /tmp/mcp/hello.txt...")
+140 | 	fileInfoRequest := mcp.CallToolRequest{}
+141 | 	fileInfoRequest.Params.Name = "get_file_info"
+142 | 	fileInfoRequest.Params.Arguments = map[string]interface{}{
+143 | 		"path": "/tmp/mcp/hello.txt",
+144 | 	}
+145 | 
+146 | 	result, err = c.CallTool(ctx, fileInfoRequest)
+147 | 	if err != nil {
+148 | 		log.Fatalf("Failed to get file info: %v", err)
+149 | 	}
+150 | 	printToolResult(result)
+151 | }
+152 | 
+153 | // Helper function to print tool results
+154 | func printToolResult(result *mcp.CallToolResult) {
+155 | 	for _, content := range result.Content {
+156 | 		if textContent, ok := content.(mcp.TextContent); ok {
+157 | 			fmt.Println(textContent.Text)
+158 | 		} else {
+159 | 			jsonBytes, _ := json.MarshalIndent(content, "", "  ")
+160 | 			fmt.Println(string(jsonBytes))
+161 | 		}
+162 | 	}
+163 | }
+164 | 
+
+
+--------------------------------------------------------------------------------

@@ -1,0 +1,3331 @@
+└── tools
+    ├── calculator.go
+    ├── doc.go
+    ├── duckduckgo
+        ├── ddg.go
+        ├── doc.go
+        └── internal
+        │   └── client.go
+    ├── metaphor
+        ├── doc.go
+        ├── documents.go
+        ├── links.go
+        ├── metaphor.go
+        └── search.go
+    ├── perplexity
+        ├── doc.go
+        ├── perplexity.go
+        └── perplexity_test.go
+    ├── scraper
+        ├── doc.go
+        ├── options.go
+        └── scraper.go
+    ├── serpapi
+        ├── doc.go
+        ├── internal
+        │   └── client.go
+        ├── options.go
+        └── serpapi.go
+    ├── sqldatabase
+        ├── mysql
+        │   ├── mysql.go
+        │   └── mysql_test.go
+        ├── postgresql
+        │   ├── postgresql.go
+        │   └── postgresql_test.go
+        ├── sql_database.go
+        ├── sqlite3
+        │   ├── sqlite3.go
+        │   └── sqlite3_test.go
+        └── testdata
+        │   └── db.sql
+    ├── tool.go
+    ├── wikipedia
+        ├── client.go
+        ├── doc.go
+        ├── wikipedia.go
+        └── wikipedia_test.go
+    └── zapier
+        ├── description.go
+        ├── doc.go
+        ├── internal
+            ├── client.go
+            └── errors.go
+        ├── toolkit.go
+        ├── zapier.go
+        └── zapier_test.go
+
+
+/tools/calculator.go:
+--------------------------------------------------------------------------------
+ 1 | package tools
+ 2 | 
+ 3 | import (
+ 4 | 	"context"
+ 5 | 	"fmt"
+ 6 | 
+ 7 | 	"github.com/tmc/langchaingo/callbacks"
+ 8 | 	"go.starlark.net/lib/math"
+ 9 | 	"go.starlark.net/starlark"
+10 | )
+11 | 
+12 | // Calculator is a tool that can do math.
+13 | type Calculator struct {
+14 | 	CallbacksHandler callbacks.Handler
+15 | }
+16 | 
+17 | var _ Tool = Calculator{}
+18 | 
+19 | // Description returns a string describing the calculator tool.
+20 | func (c Calculator) Description() string {
+21 | 	return `Useful for getting the result of a math expression. 
+22 | 	The input to this tool should be a valid mathematical expression that could be executed by a starlark evaluator.`
+23 | }
+24 | 
+25 | // Name returns the name of the tool.
+26 | func (c Calculator) Name() string {
+27 | 	return "calculator"
+28 | }
+29 | 
+30 | // Call evaluates the input using a starlak evaluator and returns the result as a
+31 | // string. If the evaluator errors the error is given in the result to give the
+32 | // agent the ability to retry.
+33 | func (c Calculator) Call(ctx context.Context, input string) (string, error) {
+34 | 	if c.CallbacksHandler != nil {
+35 | 		c.CallbacksHandler.HandleToolStart(ctx, input)
+36 | 	}
+37 | 
+38 | 	v, err := starlark.Eval(&starlark.Thread{Name: "main"}, "input", input, math.Module.Members)
+39 | 	if err != nil {
+40 | 		return fmt.Sprintf("error from evaluator: %s", err.Error()), nil //nolint:nilerr
+41 | 	}
+42 | 	result := v.String()
+43 | 
+44 | 	if c.CallbacksHandler != nil {
+45 | 		c.CallbacksHandler.HandleToolEnd(ctx, result)
+46 | 	}
+47 | 
+48 | 	return result, nil
+49 | }
+50 | 
+
+
+--------------------------------------------------------------------------------
+/tools/doc.go:
+--------------------------------------------------------------------------------
+1 | // Package tools defines a standard interface for tools to be used by agents.
+2 | package tools
+3 | 
+
+
+--------------------------------------------------------------------------------
+/tools/duckduckgo/ddg.go:
+--------------------------------------------------------------------------------
+ 1 | package duckduckgo
+ 2 | 
+ 3 | import (
+ 4 | 	"context"
+ 5 | 	"errors"
+ 6 | 
+ 7 | 	"github.com/tmc/langchaingo/callbacks"
+ 8 | 	"github.com/tmc/langchaingo/tools"
+ 9 | 	"github.com/tmc/langchaingo/tools/duckduckgo/internal"
+10 | )
+11 | 
+12 | // DefaultUserAgent defines a default value for user-agent header.
+13 | const DefaultUserAgent = "github.com/tmc/langchaingo/tools/duckduckgo"
+14 | 
+15 | // Tool defines a tool implementation for the DuckDuckGo Search.
+16 | type Tool struct {
+17 | 	CallbacksHandler callbacks.Handler
+18 | 	client           *internal.Client
+19 | }
+20 | 
+21 | var _ tools.Tool = Tool{}
+22 | 
+23 | // New initializes a new DuckDuckGo Search tool with arguments for setting a
+24 | // max results per search query and a value for the user agent header.
+25 | func New(maxResults int, userAgent string) (*Tool, error) {
+26 | 	return &Tool{
+27 | 		client: internal.New(maxResults, userAgent),
+28 | 	}, nil
+29 | }
+30 | 
+31 | // Name returns a name for the tool.
+32 | func (t Tool) Name() string {
+33 | 	return "DuckDuckGo Search"
+34 | }
+35 | 
+36 | // Description returns a description for the tool.
+37 | func (t Tool) Description() string {
+38 | 	return `
+39 | 	"A wrapper around DuckDuckGo Search."
+40 | 	"Free search alternative to google and serpapi."
+41 | 	"Input should be a search query."`
+42 | }
+43 | 
+44 | // Call performs the search and return the result.
+45 | func (t Tool) Call(ctx context.Context, input string) (string, error) {
+46 | 	if t.CallbacksHandler != nil {
+47 | 		t.CallbacksHandler.HandleToolStart(ctx, input)
+48 | 	}
+49 | 
+50 | 	result, err := t.client.Search(ctx, input)
+51 | 	if err != nil {
+52 | 		if errors.Is(err, internal.ErrNoGoodResult) {
+53 | 			return "No good DuckDuckGo Search Results was found", nil
+54 | 		}
+55 | 		if t.CallbacksHandler != nil {
+56 | 			t.CallbacksHandler.HandleToolError(ctx, err)
+57 | 		}
+58 | 		return "", err
+59 | 	}
+60 | 
+61 | 	if t.CallbacksHandler != nil {
+62 | 		t.CallbacksHandler.HandleToolEnd(ctx, result)
+63 | 	}
+64 | 
+65 | 	return result, nil
+66 | }
+67 | 
+
+
+--------------------------------------------------------------------------------
+/tools/duckduckgo/doc.go:
+--------------------------------------------------------------------------------
+1 | // Package duckduckgo contains an implementation of the tool interface with the
+2 | // duckduckgo api client.
+3 | package duckduckgo
+4 | 
+
+
+--------------------------------------------------------------------------------
+/tools/duckduckgo/internal/client.go:
+--------------------------------------------------------------------------------
+  1 | package internal
+  2 | 
+  3 | import (
+  4 | 	"context"
+  5 | 	"errors"
+  6 | 	"fmt"
+  7 | 	"net/http"
+  8 | 	"net/url"
+  9 | 	"strings"
+ 10 | 
+ 11 | 	"github.com/PuerkitoBio/goquery"
+ 12 | )
+ 13 | 
+ 14 | var (
+ 15 | 	ErrNoGoodResult = errors.New("no good search results found")
+ 16 | 	ErrAPIResponse  = errors.New("duckduckgo api responded with error")
+ 17 | )
+ 18 | 
+ 19 | // Client defines an HTTP client for communicating with duckduckgo.
+ 20 | type Client struct {
+ 21 | 	maxResults int
+ 22 | 	userAgent  string
+ 23 | }
+ 24 | 
+ 25 | // Result defines a search query result type.
+ 26 | type Result struct {
+ 27 | 	Title string
+ 28 | 	Info  string
+ 29 | 	Ref   string
+ 30 | }
+ 31 | 
+ 32 | // New initializes a Client with arguments for setting a max
+ 33 | // results per search query and a value for the user agent header.
+ 34 | func New(maxResults int, userAgent string) *Client {
+ 35 | 	if maxResults == 0 {
+ 36 | 		maxResults = 1
+ 37 | 	}
+ 38 | 
+ 39 | 	return &Client{
+ 40 | 		maxResults: maxResults,
+ 41 | 		userAgent:  userAgent,
+ 42 | 	}
+ 43 | }
+ 44 | 
+ 45 | func (client *Client) newRequest(ctx context.Context, queryURL string) (*http.Request, error) {
+ 46 | 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, queryURL, nil)
+ 47 | 	if err != nil {
+ 48 | 		return nil, fmt.Errorf("creating duckduckgo request: %w", err)
+ 49 | 	}
+ 50 | 
+ 51 | 	if client.userAgent != "" {
+ 52 | 		request.Header.Add("User-Agent", client.userAgent)
+ 53 | 	}
+ 54 | 
+ 55 | 	return request, nil
+ 56 | }
+ 57 | 
+ 58 | // Search performs a search query and returns
+ 59 | // the result as string and an error if any.
+ 60 | func (client *Client) Search(ctx context.Context, query string) (string, error) {
+ 61 | 	queryURL := fmt.Sprintf("https://html.duckduckgo.com/html/?q=%s", url.QueryEscape(query))
+ 62 | 
+ 63 | 	request, err := client.newRequest(ctx, queryURL)
+ 64 | 	if err != nil {
+ 65 | 		return "", err
+ 66 | 	}
+ 67 | 
+ 68 | 	response, err := http.DefaultClient.Do(request)
+ 69 | 	if err != nil {
+ 70 | 		return "", fmt.Errorf("get %s error: %w", queryURL, err)
+ 71 | 	}
+ 72 | 
+ 73 | 	defer response.Body.Close()
+ 74 | 	if response.StatusCode != http.StatusOK {
+ 75 | 		return "", ErrAPIResponse
+ 76 | 	}
+ 77 | 
+ 78 | 	doc, err := goquery.NewDocumentFromReader(response.Body)
+ 79 | 	if err != nil {
+ 80 | 		return "", fmt.Errorf("new document error: %w", err)
+ 81 | 	}
+ 82 | 
+ 83 | 	results := []Result{}
+ 84 | 	sel := doc.Find(".web-result")
+ 85 | 
+ 86 | 	for i := range sel.Nodes {
+ 87 | 		// Break loop once required amount of results are add
+ 88 | 		if client.maxResults == len(results) {
+ 89 | 			break
+ 90 | 		}
+ 91 | 		node := sel.Eq(i)
+ 92 | 		titleNode := node.Find(".result__a")
+ 93 | 
+ 94 | 		info := node.Find(".result__snippet").Text()
+ 95 | 		title := titleNode.Text()
+ 96 | 		ref := ""
+ 97 | 
+ 98 | 		if len(titleNode.Nodes) > 0 && len(titleNode.Nodes[0].Attr) > 2 {
+ 99 | 			ref, err = url.QueryUnescape(
+100 | 				strings.TrimPrefix(
+101 | 					titleNode.Nodes[0].Attr[2].Val,
+102 | 					"/l/?kh=-1&uddg=",
+103 | 				),
+104 | 			)
+105 | 			if err != nil {
+106 | 				return "", err
+107 | 			}
+108 | 		}
+109 | 
+110 | 		results = append(results, Result{title, info, ref})
+111 | 	}
+112 | 
+113 | 	return client.formatResults(results), nil
+114 | }
+115 | 
+116 | func (client *Client) SetMaxResults(n int) {
+117 | 	client.maxResults = n
+118 | }
+119 | 
+120 | // formatResults will return a structured string with the results.
+121 | func (client *Client) formatResults(results []Result) string {
+122 | 	formattedResults := ""
+123 | 
+124 | 	for _, result := range results {
+125 | 		formattedResults += fmt.Sprintf("Title: %s\nDescription: %s\nURL: %s\n\n", result.Title, result.Info, result.Ref)
+126 | 	}
+127 | 
+128 | 	return formattedResults
+129 | }
+130 | 
+
+
+--------------------------------------------------------------------------------
+/tools/metaphor/doc.go:
+--------------------------------------------------------------------------------
+1 | // // Package metaphor contains an implementation of the tool interface with the
+2 | // metaphor search api client.
+3 | package metaphor
+4 | 
+
+
+--------------------------------------------------------------------------------
+/tools/metaphor/documents.go:
+--------------------------------------------------------------------------------
+  1 | package metaphor
+  2 | 
+  3 | import (
+  4 | 	"context"
+  5 | 	"errors"
+  6 | 	"fmt"
+  7 | 	"os"
+  8 | 	"strings"
+  9 | 
+ 10 | 	"github.com/metaphorsystems/metaphor-go"
+ 11 | 	"github.com/tmc/langchaingo/tools"
+ 12 | )
+ 13 | 
+ 14 | // Documents defines a tool implementation for the Metaphor Web scrapper.
+ 15 | type Documents struct {
+ 16 | 	client  *metaphor.Client
+ 17 | 	options []metaphor.ClientOptions
+ 18 | }
+ 19 | 
+ 20 | var _ tools.Tool = &Documents{}
+ 21 | 
+ 22 | // NewDocuments creates a new instance of the Documents struct.
+ 23 | //
+ 24 | // The function takes in optional metaphorm.ClientOptions as parameters.
+ 25 | // It returns a pointer to a Documents struct and an error.
+ 26 | func NewDocuments(options ...metaphor.ClientOptions) (*Documents, error) {
+ 27 | 	apiKey := os.Getenv("METAPHOR_API_KEY")
+ 28 | 
+ 29 | 	client, err := metaphor.NewClient(apiKey, options...)
+ 30 | 	if err != nil {
+ 31 | 		return nil, err
+ 32 | 	}
+ 33 | 
+ 34 | 	return &Documents{
+ 35 | 		client:  client,
+ 36 | 		options: options,
+ 37 | 	}, nil
+ 38 | }
+ 39 | 
+ 40 | // SetOptions sets the options for the Documents struct.
+ 41 | //
+ 42 | // It takes in variadic parameter(s) of type `metaphor.ClientOptions`.
+ 43 | func (tool *Documents) SetOptions(options ...metaphor.ClientOptions) {
+ 44 | 	tool.options = options
+ 45 | }
+ 46 | 
+ 47 | // Name returns the name of the Documents tool.
+ 48 | //
+ 49 | // It does not take any parameters.
+ 50 | // It returns a string, which is the name of the tool.
+ 51 | func (tool *Documents) Name() string {
+ 52 | 	return "Metaphor Contents Extractor"
+ 53 | }
+ 54 | 
+ 55 | // Description returns the contents of web pages based on a list of ID strings.
+ 56 | //
+ 57 | // It is designed to be used with Metaphor Search and/or Metaphor Links Search Tool.
+ 58 | // The expected input format is a list of ID strings obtained from either Metaphor Search or Metaphor Search Links tool.
+ 59 | // The function returns a string.
+ 60 | func (tool *Documents) Description() string {
+ 61 | 	return `
+ 62 | 	To be used with Metaphor Search and/or Metaphor Links Search Tool.
+ 63 | 	Retrieve contents of web pages based on a list of ID strings.
+ 64 | 	obtained from either Metaphor Search or Metaphor Search Links tool.
+ 65 | 	Expected input format:
+ 66 | 	"8U71IlQ5DUTdsherhhYA,9segZCZGNjjQB2yD2uyK,..."`
+ 67 | }
+ 68 | 
+ 69 | // Call calls the Documents API with the given input and returns the formatted contents.
+ 70 | //
+ 71 | // The input is a string that contains a comma-separated list of IDs.
+ 72 | //
+ 73 | // It returns a string which represents the formatted contents and an error if any.
+ 74 | func (tool *Documents) Call(ctx context.Context, input string) (string, error) {
+ 75 | 	ids := strings.Split(input, ",")
+ 76 | 	for i, id := range ids {
+ 77 | 		ids[i] = strings.TrimSpace(id)
+ 78 | 	}
+ 79 | 
+ 80 | 	contents, err := tool.client.GetContents(ctx, ids)
+ 81 | 	if err != nil {
+ 82 | 		if errors.Is(err, metaphor.ErrNoContentExtracted) {
+ 83 | 			return "Metaphor Extractor didn't return any results", nil
+ 84 | 		}
+ 85 | 		return "", err
+ 86 | 	}
+ 87 | 
+ 88 | 	return tool.formatContents(contents), nil
+ 89 | }
+ 90 | 
+ 91 | func (tool *Documents) formatContents(response *metaphor.ContentsResponse) string {
+ 92 | 	formattedResults := ""
+ 93 | 
+ 94 | 	for _, result := range response.Contents {
+ 95 | 		formattedResults += fmt.Sprintf("Title: %s\nContent: %s\nURL: %s\n\n", result.Title, result.Extract, result.URL)
+ 96 | 	}
+ 97 | 
+ 98 | 	return formattedResults
+ 99 | }
+100 | 
+
+
+--------------------------------------------------------------------------------
+/tools/metaphor/links.go:
+--------------------------------------------------------------------------------
+ 1 | //nolint:dupl
+ 2 | package metaphor
+ 3 | 
+ 4 | import (
+ 5 | 	"context"
+ 6 | 	"errors"
+ 7 | 	"fmt"
+ 8 | 	"os"
+ 9 | 
+10 | 	"github.com/metaphorsystems/metaphor-go"
+11 | 	"github.com/tmc/langchaingo/tools"
+12 | )
+13 | 
+14 | // LinksSearch defines a tool implementation for the Metaphor Find Similar Links.
+15 | type LinksSearch struct {
+16 | 	client  *metaphor.Client
+17 | 	options []metaphor.ClientOptions
+18 | }
+19 | 
+20 | var _ tools.Tool = &LinksSearch{}
+21 | 
+22 | // NewLinksSearch creates a new metaphor Search instance, that
+23 | // can be used to find similar links.
+24 | //
+25 | // It accepts an optional list of ClientOptions as parameters.
+26 | // It returns a pointer to a LinksSearch instance and an error.
+27 | func NewLinksSearch(options ...metaphor.ClientOptions) (*LinksSearch, error) {
+28 | 	apiKey := os.Getenv("METAPHOR_API_KEY")
+29 | 
+30 | 	client, err := metaphor.NewClient(apiKey, options...)
+31 | 	if err != nil {
+32 | 		return nil, err
+33 | 	}
+34 | 	metaphor := &LinksSearch{
+35 | 		client:  client,
+36 | 		options: options,
+37 | 	}
+38 | 
+39 | 	return metaphor, nil
+40 | }
+41 | 
+42 | // SetOptions sets the options for the LinksSearch tool.
+43 | //
+44 | // It takes in one or more ClientOptions parameters and assigns them to the tool's options field.
+45 | func (tool *LinksSearch) SetOptions(options ...metaphor.ClientOptions) {
+46 | 	tool.options = options
+47 | }
+48 | 
+49 | // Name returns the name of the LinksSearch tool.
+50 | //
+51 | // No parameters.
+52 | // Returns a string.
+53 | func (tool *LinksSearch) Name() string {
+54 | 	return "Metaphor Links Search"
+55 | }
+56 | 
+57 | // Description returns the description of the LinksSearch tool.
+58 | //
+59 | // This function does not take any parameters.
+60 | // It returns a string that describes the purpose of the LinksSearch tool.
+61 | func (tool *LinksSearch) Description() string {
+62 | 	return `
+63 | 	Metaphor Links Search finds similar links to the link provided.
+64 | 	Input should be the url string for which you would like to find similar links`
+65 | }
+66 | 
+67 | // Call searches for similar links using the LinksSearch tool.
+68 | //
+69 | // ctx - the context in which the function is called.
+70 | // input - the string input used to find similar links, i.e. the url.
+71 | // Returns a string containing the formatted links and an error if any occurred.
+72 | func (tool *LinksSearch) Call(ctx context.Context, input string) (string, error) {
+73 | 	links, err := tool.client.FindSimilar(ctx, input, tool.options...)
+74 | 	if err != nil {
+75 | 		if errors.Is(err, metaphor.ErrNoLinksFound) {
+76 | 			return "Metaphor Links Search didn't return any results", nil
+77 | 		}
+78 | 		return "", err
+79 | 	}
+80 | 
+81 | 	return tool.formatLinks(links), nil
+82 | }
+83 | 
+84 | func (tool *LinksSearch) formatLinks(response *metaphor.SearchResponse) string {
+85 | 	formattedResults := ""
+86 | 
+87 | 	for _, result := range response.Results {
+88 | 		formattedResults += fmt.Sprintf("Title: %s\nURL: %s\nID: %s\n\n", result.Title, result.URL, result.ID)
+89 | 	}
+90 | 
+91 | 	return formattedResults
+92 | }
+93 | 
+
+
+--------------------------------------------------------------------------------
+/tools/metaphor/metaphor.go:
+--------------------------------------------------------------------------------
+  1 | package metaphor
+  2 | 
+  3 | import (
+  4 | 	"context"
+  5 | 	"encoding/json"
+  6 | 	"errors"
+  7 | 	"fmt"
+  8 | 	"os"
+  9 | 	"regexp"
+ 10 | 	"strings"
+ 11 | 
+ 12 | 	"github.com/metaphorsystems/metaphor-go"
+ 13 | 	"github.com/tmc/langchaingo/tools"
+ 14 | )
+ 15 | 
+ 16 | var _ tools.Tool = &API{}
+ 17 | 
+ 18 | // API defines a tool implementation for the Metaphor API.
+ 19 | type API struct {
+ 20 | 	client *metaphor.Client
+ 21 | }
+ 22 | 
+ 23 | // ToolInput defines a struct the tool expects as input.
+ 24 | type ToolInput struct {
+ 25 | 	Operation  string                  `json:"operation"`
+ 26 | 	Input      string                  `json:"input"`
+ 27 | 	ReqOptions metaphor.RequestOptions `json:"reqOptions"`
+ 28 | }
+ 29 | 
+ 30 | // NewClient initializes a new API client.
+ 31 | //
+ 32 | // It retrieves the API key from the environment variable "METAPHOR_API_KEY"
+ 33 | // and creates a new client using the retrieved API key. If the API key is not
+ 34 | // set or an error occurs during client creation, an error is returned.
+ 35 | //
+ 36 | // Returns a pointer to the created API client and an error, if any.
+ 37 | func NewClient() (*API, error) {
+ 38 | 	apiKey := os.Getenv("METAPHOR_API_KEY")
+ 39 | 
+ 40 | 	client, err := metaphor.NewClient(apiKey)
+ 41 | 	if err != nil {
+ 42 | 		return nil, err
+ 43 | 	}
+ 44 | 
+ 45 | 	return &API{
+ 46 | 		client: client,
+ 47 | 	}, nil
+ 48 | }
+ 49 | 
+ 50 | // Name returns the name of the tool.
+ 51 | //
+ 52 | // No parameters.
+ 53 | // Returns a string.
+ 54 | func (tool *API) Name() string {
+ 55 | 	return "Metaphor API Tool"
+ 56 | }
+ 57 | 
+ 58 | // Description returns the Description of the tool.
+ 59 | // Description contains a short instruction how to use the tool
+ 60 | // with the Metaphor API
+ 61 | //
+ 62 | // No parameters.
+ 63 | // Returns a string.
+ 64 | func (tool *API) Description() string {
+ 65 | 	return `
+ 66 | 	Metaphor API Tool is a tool to interact with the Metaphor API. Metaphor is a search engine
+ 67 | 	trained to do link prediction.
+ 68 | 	This means that given some text prompt, it tries to predict the link that would most likely
+ 69 | 	follow that prompt. This tool shouls be used when you want to add spcific filters to your search qeury
+ 70 | 
+ 71 | 	Tool expects string json of the format as input:
+ 72 | 	{
+ 73 | 		"operation": "YourOperation",
+ 74 | 		"input": "YourInput",
+ 75 | 		"reqOptions": {
+ 76 | 			"numResults": 10,
+ 77 | 			"includeDomains": ["example.com", "example2.com"],
+ 78 | 			"excludeDomains": ["exclude.com"],
+ 79 | 			"startCrawlDate": "2023-08-15T00:00:00Z",
+ 80 | 			"endCrawlDate": "2023-08-16T00:00:00Z",
+ 81 | 			"startPublishedDate": "2023-08-15T00:00:00Z",
+ 82 | 			"endPublishedDate": "2023-08-16T00:00:00Z",
+ 83 | 			"useAutoprompt": true,
+ 84 | 			"type": "neural"
+ 85 | 		}
+ 86 | 	}
+ 87 | 
+ 88 | 	Input json should be built from API reference and the following instructions:
+ 89 | 
+ 90 | 	- operation: Api call to be performed, possible values: "Search", "FindSimilar", "GetContents"
+ 91 | 	- input: value of the search query or link, for search and findSimilar endpoints respectively
+ 92 | 	- reqOptions: json of options API parameters
+ 93 | 
+ 94 | 	Note: Omit any fields in the reqOptions that you're not going to use in the call.
+ 95 | 
+ 96 | 	API Reference:
+ 97 | 	- Search
+ 98 | 		POST https://api.metaphor.systems/search
+ 99 | 		Perform a search with a Metaphor prompt-engineered query and retrieve a list of relevant results.
+100 | 
+101 | 		Unique BODY PARAM for Search:
+102 | 		query (string, required)
+103 | 			The query string for the search. It's vital that the query takes the form of a declarative
+104 | 			suggestion, where a high-quality search result link would follow. For example,
+105 | 			'best restaurants in SF' is a bad query,
+106 | 			whereas 'Here is the best restaurant in SF:' is a good query.
+107 | 
+108 | 	- Find similar links
+109 | 		POST https://api.metaphor.systems/findSimilar
+110 | 		Find similar links to the link provided.
+111 | 
+112 | 		Unique BODY PARAM for Find similar links:
+113 | 		url (string, required)
+114 | 			The URL for which you would like to find similar links.
+115 | 
+116 | 	Common BODY PARAMS for both endpoints:
+117 | 		numResults (integer)
+118 | 			Number of search results to return. Default 10. Up to 30 for basic plans. Up to thousands for custom plans.
+119 | 
+120 | 		includeDomains (array of strings)
+121 | 			Optional list of domains to include in the search. Results will only come from these domains.
+122 | 
+123 | 		excludeDomains (array of strings)
+124 | 			Optional list of domains to exclude from the search. Results will not include any from these domains.
+125 | 
+126 | 		startCrawlDate (date-time)
+127 | 			Optional start date for the crawled data in ISO 8601 format.
+128 | 			Search will only include results crawled on or after this date.
+129 | 
+130 | 		endCrawlDate (date-time)
+131 | 			Optional end date for the crawled data in ISO 8601 format.
+132 | 			Search will only include results crawled on or before this date.
+133 | 
+134 | 		startPublishedDate (date-time)
+135 | 			Optional start date for the published data in ISO 8601 format.
+136 | 			Search will only include results published on or after this date.
+137 | 
+138 | 		endPublishedDate (date-time)
+139 | 			Optional end date for the published data in ISO 8601 format.
+140 | 			Search will only include results published on or before this date.
+141 | 
+142 | 	- Get contents of documents
+143 | 		GET https://api.metaphor.systems/contents
+144 | 		Retrieve contents of documents based on a list of document IDs.
+145 | 
+146 | 		QUERY PARAMS
+147 | 		ids (array of strings, required)
+148 | 			An array of document IDs obtained from either /search or /findSimilar endpoints.`
+149 | }
+150 | 
+151 | // Call is a function that takes a context and an input string and returns a string and an error.
+152 | //
+153 | // The function expects a JSON string as input and unmarshals it into a ToolInput struct.
+154 | // It then performs different operations based on the value of the Operation field in the ToolInput struct.
+155 | // The supported operations are "Search", "FindSimilar", and "GetContents".
+156 | //
+157 | // If the Operation is "Search", the function calls the performSearch method passing the
+158 | // context and the ToolInput struct.
+159 | // If the Operation is "FindSimilar", the function calls the findSimilar method passing the
+160 | // context and the ToolInput struct.
+161 | // If the Operation is "GetContents", the function calls the getContents method passing the
+162 | // context and the ToolInput struct.
+163 | //
+164 | // The function returns the result of the respective operation or an empty string and nil
+165 | // if the Operation is not supported.
+166 | func (tool *API) Call(ctx context.Context, input string) (string, error) {
+167 | 	var toolInput ToolInput
+168 | 
+169 | 	re := regexp.MustCompile(`(?s)\{.*\}`)
+170 | 	jsonString := re.FindString(input)
+171 | 
+172 | 	err := json.Unmarshal([]byte(jsonString), &toolInput)
+173 | 	if err != nil {
+174 | 		return "", err
+175 | 	}
+176 | 
+177 | 	switch toolInput.Operation {
+178 | 	case "Search":
+179 | 		return tool.performSearch(ctx, toolInput)
+180 | 	case "FindSimilar":
+181 | 		return tool.findSimilar(ctx, toolInput)
+182 | 	case "GetContents":
+183 | 		return tool.getContents(ctx, toolInput)
+184 | 	}
+185 | 
+186 | 	return "", nil
+187 | }
+188 | 
+189 | func (tool *API) performSearch(ctx context.Context, toolInput ToolInput) (string, error) {
+190 | 	response, err := tool.client.Search(
+191 | 		ctx,
+192 | 		toolInput.Input,
+193 | 		metaphor.WithRequestOptions(&toolInput.ReqOptions),
+194 | 	)
+195 | 	if err != nil {
+196 | 		if errors.Is(err, metaphor.ErrNoSearchResults) {
+197 | 			return "Metaphor Search didn't return any results", nil
+198 | 		}
+199 | 		return "", err
+200 | 	}
+201 | 	return tool.formatResults(response), err
+202 | }
+203 | 
+204 | func (tool *API) findSimilar(ctx context.Context, toolInput ToolInput) (string, error) {
+205 | 	response, err := tool.client.FindSimilar(
+206 | 		ctx,
+207 | 		toolInput.Input,
+208 | 		metaphor.WithRequestOptions(&toolInput.ReqOptions),
+209 | 	)
+210 | 	if err != nil {
+211 | 		if errors.Is(err, metaphor.ErrNoLinksFound) {
+212 | 			return "Metaphor Links Search didn't return any results", nil
+213 | 		}
+214 | 		return "", err
+215 | 	}
+216 | 	return tool.formatResults(response), err
+217 | }
+218 | 
+219 | func (tool *API) getContents(ctx context.Context, toolInput ToolInput) (string, error) {
+220 | 	ids := strings.Split(toolInput.Input, ",")
+221 | 	for i, id := range ids {
+222 | 		ids[i] = strings.TrimSpace(id)
+223 | 	}
+224 | 
+225 | 	response, err := tool.client.GetContents(ctx, ids)
+226 | 	if err != nil {
+227 | 		if errors.Is(err, metaphor.ErrNoContentExtracted) {
+228 | 			return "Metaphor Extractor didn't return any results", nil
+229 | 		}
+230 | 		return "", err
+231 | 	}
+232 | 
+233 | 	return tool.formatContents(response), err
+234 | }
+235 | 
+236 | func (tool *API) formatResults(response *metaphor.SearchResponse) string {
+237 | 	formattedResults := ""
+238 | 
+239 | 	for _, result := range response.Results {
+240 | 		formattedResults += fmt.Sprintf("Title: %s\nURL: %s\nID: %s\n\n", result.Title, result.URL, result.ID)
+241 | 	}
+242 | 
+243 | 	return formattedResults
+244 | }
+245 | 
+246 | func (tool *API) formatContents(response *metaphor.ContentsResponse) string {
+247 | 	formattedResults := ""
+248 | 
+249 | 	for _, result := range response.Contents {
+250 | 		formattedResults += fmt.Sprintf("Title: %s\nContent: %s\nURL: %s\n\n", result.Title, result.Extract, result.URL)
+251 | 	}
+252 | 
+253 | 	return formattedResults
+254 | }
+255 | 
+
+
+--------------------------------------------------------------------------------
+/tools/metaphor/search.go:
+--------------------------------------------------------------------------------
+ 1 | //nolint:dupl
+ 2 | package metaphor
+ 3 | 
+ 4 | import (
+ 5 | 	"context"
+ 6 | 	"errors"
+ 7 | 	"fmt"
+ 8 | 	"os"
+ 9 | 
+10 | 	"github.com/metaphorsystems/metaphor-go"
+11 | 	"github.com/tmc/langchaingo/tools"
+12 | )
+13 | 
+14 | // Search defines a tool implementation for the Metaphor Search.
+15 | type Search struct {
+16 | 	client  *metaphor.Client
+17 | 	options []metaphor.ClientOptions
+18 | }
+19 | 
+20 | var _ tools.Tool = &Search{}
+21 | 
+22 | // NewSearch creates a new Metaphot Search instance.
+23 | //
+24 | // It accepts an optional variadic parameter of type metaphor.ClientOptions.
+25 | // The function returns a pointer to a Search instance and an error.
+26 | func NewSearch(options ...metaphor.ClientOptions) (*Search, error) {
+27 | 	apiKey := os.Getenv("METAPHOR_API_KEY")
+28 | 
+29 | 	client, err := metaphor.NewClient(apiKey, options...)
+30 | 	if err != nil {
+31 | 		return nil, err
+32 | 	}
+33 | 
+34 | 	metaphor := &Search{
+35 | 		client:  client,
+36 | 		options: options,
+37 | 	}
+38 | 
+39 | 	return metaphor, nil
+40 | }
+41 | 
+42 | // SetOptions sets the options for the Search tool.
+43 | //
+44 | // options is a variadic parameter of type metaphor.ClientOptions.
+45 | func (tool *Search) SetOptions(options ...metaphor.ClientOptions) {
+46 | 	tool.options = options
+47 | }
+48 | 
+49 | // Name returns the name of the Search tool.
+50 | //
+51 | // This function takes no parameters.
+52 | // It returns a string.
+53 | func (tool *Search) Name() string {
+54 | 	return "Metaphor Search"
+55 | }
+56 | 
+57 | // Description returns the description of the Search tool.
+58 | //
+59 | // This function does not take any parameters.
+60 | // It returns a string that contains the description of the Search tool.
+61 | func (tool *Search) Description() string {
+62 | 	return `
+63 | 	Metaphor Search uses a transformer architecture to predict links given text,
+64 | 	and it gets its power from having been trained on the way that people talk
+65 | 	about links on the Internet. The model does expect queries that look like
+66 | 	how people describe a link on the Internet. For example:
+67 | 	"'best restaurants in SF" is a bad query, whereas
+68 | 	"Here is the best restaurant in SF:" is a good query.
+69 | 	`
+70 | }
+71 | 
+72 | // Call performs a search using the Search client.
+73 | //
+74 | // It takes a context.Context and a search query as string input as parameters.
+75 | // It returns a string and an error.
+76 | func (tool *Search) Call(ctx context.Context, input string) (string, error) {
+77 | 	response, err := tool.client.Search(ctx, input, tool.options...)
+78 | 	if err != nil {
+79 | 		if errors.Is(err, metaphor.ErrNoSearchResults) {
+80 | 			return "Metaphor Search didn't return any results", nil
+81 | 		}
+82 | 		return "", err
+83 | 	}
+84 | 
+85 | 	return tool.formatResults(response), nil
+86 | }
+87 | 
+88 | func (tool *Search) formatResults(response *metaphor.SearchResponse) string {
+89 | 	formattedResults := ""
+90 | 
+91 | 	for _, result := range response.Results {
+92 | 		formattedResults += fmt.Sprintf("Title: %s\nURL: %s\nID: %s\n\n", result.Title, result.URL, result.ID)
+93 | 	}
+94 | 
+95 | 	return formattedResults
+96 | }
+97 | 
+
+
+--------------------------------------------------------------------------------
+/tools/perplexity/doc.go:
+--------------------------------------------------------------------------------
+ 1 | // Package perplexity provides integration with Perplexity AI's API for AI agents.
+ 2 | //
+ 3 | // Perplexity AI functions as an AI-powered search engine that indexes, analyzes,
+ 4 | // and summarizes content from across the internet. This package allows you to
+ 5 | // integrate Perplexity's capabilities into your AI agents to enrich them with
+ 6 | // up-to-date web data.
+ 7 | //
+ 8 | // Example usage:
+ 9 | //
+10 | //	llm, err := openai.New(
+11 | //		openai.WithModel("gpt-4-mini"),
+12 | //		openai.WithCallback(callbacks.LogHandler{}),
+13 | //	)
+14 | //	if err != nil {
+15 | //		return err
+16 | //	}
+17 | //
+18 | //	// Create a new Perplexity instance
+19 | //	perpl, err := perplexity.New(
+20 | //		perplexity.WithModel(perplexity.ModelLlamaSonarSmall),
+21 | //		perplexity.WithAPIKey("your-api-key"), // Optional: defaults to PERPLEXITY_API_KEY env var
+22 | //	)
+23 | //	if err != nil {
+24 | //		return err
+25 | //	}
+26 | //
+27 | //	// Add Perplexity as a tool for your agent
+28 | //	agentTools := []tools.Tool{
+29 | //		perpl,
+30 | //	}
+31 | //
+32 | //	// Create and use the agent
+33 | //	toolAgent := agents.NewOneShotAgent(llm,
+34 | //		agentTools,
+35 | //		agents.WithMaxIterations(2),
+36 | //	)
+37 | //	executor := agents.NewExecutor(toolAgent)
+38 | //
+39 | //	answer, err := chains.Run(context.Background(), executor, "your question here")
+40 | package perplexity
+41 | 
+
+
+--------------------------------------------------------------------------------
+/tools/perplexity/perplexity.go:
+--------------------------------------------------------------------------------
+  1 | package perplexity
+  2 | 
+  3 | import (
+  4 | 	"context"
+  5 | 	"fmt"
+  6 | 	"os"
+  7 | 
+  8 | 	"github.com/tmc/langchaingo/callbacks"
+  9 | 	"github.com/tmc/langchaingo/llms"
+ 10 | 	"github.com/tmc/langchaingo/llms/openai"
+ 11 | 	"github.com/tmc/langchaingo/tools"
+ 12 | )
+ 13 | 
+ 14 | // Model represents a Perplexity AI model type.
+ 15 | type Model string
+ 16 | 
+ 17 | // Model pricing overview: https://docs.perplexity.ai/guides/pricing
+ 18 | const (
+ 19 | 	// ModelLlamaSonarSmall is the small version of the Llama Sonar model.
+ 20 | 	ModelLlamaSonarSmall Model = "llama-3.1-sonar-small-128k-online"
+ 21 | 	// ModelLlamaSonarLarge is the large version of the Llama Sonar model.
+ 22 | 	ModelLlamaSonarLarge Model = "llama-3.1-sonar-large-128k-online"
+ 23 | 	// ModelLlamaSonarHuge is the huge version of the Llama Sonar model.
+ 24 | 	ModelLlamaSonarHuge Model = "llama-3.1-sonar-huge-128k-online"
+ 25 | )
+ 26 | 
+ 27 | // Option is a function that modifies the options for the Perplexity AI tool.
+ 28 | type Option func(*options)
+ 29 | 
+ 30 | type options struct {
+ 31 | 	apiKey string
+ 32 | 	model  Model
+ 33 | }
+ 34 | 
+ 35 | // WithAPIKey sets the API key for Perplexity AI.
+ 36 | func WithAPIKey(apiKey string) Option {
+ 37 | 	return func(o *options) {
+ 38 | 		o.apiKey = apiKey
+ 39 | 	}
+ 40 | }
+ 41 | 
+ 42 | // WithModel sets the model to be used by Perplexity AI.
+ 43 | func WithModel(model Model) Option {
+ 44 | 	return func(o *options) {
+ 45 | 		o.model = model
+ 46 | 	}
+ 47 | }
+ 48 | 
+ 49 | // Tool implements the Perplexity AI integration.
+ 50 | type Tool struct {
+ 51 | 	llm              *openai.LLM
+ 52 | 	CallbacksHandler callbacks.Handler
+ 53 | }
+ 54 | 
+ 55 | var _ tools.Tool = (*Tool)(nil)
+ 56 | 
+ 57 | // New creates a new instance of the Perplexity AI tool with the given options.
+ 58 | func New(opts ...Option) (*Tool, error) {
+ 59 | 	options := &options{
+ 60 | 		apiKey: os.Getenv("PERPLEXITY_API_KEY"),
+ 61 | 		model:  ModelLlamaSonarSmall, // Default model
+ 62 | 	}
+ 63 | 
+ 64 | 	for _, opt := range opts {
+ 65 | 		opt(options)
+ 66 | 	}
+ 67 | 
+ 68 | 	if options.apiKey == "" {
+ 69 | 		return nil, fmt.Errorf("PERPLEXITY_API_KEY key not set")
+ 70 | 	}
+ 71 | 
+ 72 | 	llm, err := openai.New(
+ 73 | 		openai.WithModel(string(options.model)),
+ 74 | 		openai.WithBaseURL("https://api.perplexity.ai"),
+ 75 | 		openai.WithToken(options.apiKey),
+ 76 | 	)
+ 77 | 	if err != nil {
+ 78 | 		return nil, err
+ 79 | 	}
+ 80 | 
+ 81 | 	return &Tool{
+ 82 | 		llm: llm,
+ 83 | 	}, nil
+ 84 | }
+ 85 | 
+ 86 | // Name returns the name of the tool.
+ 87 | func (t *Tool) Name() string {
+ 88 | 	return "PerplexityAI"
+ 89 | }
+ 90 | 
+ 91 | // Description returns a description of the Perplexity AI tool's capabilities.
+ 92 | func (t *Tool) Description() string {
+ 93 | 	return "Perplexity AI has access to a wide range of information, as it functions as an AI-powered search engine that indexes, analyzes, and summarizes content from across the internet."
+ 94 | }
+ 95 | 
+ 96 | // Call executes a query against the Perplexity AI model and returns the response.
+ 97 | func (t *Tool) Call(ctx context.Context, input string) (string, error) {
+ 98 | 	if t.CallbacksHandler != nil {
+ 99 | 		t.CallbacksHandler.HandleToolStart(ctx, input)
+100 | 	}
+101 | 
+102 | 	content := []llms.MessageContent{
+103 | 		llms.TextParts(llms.ChatMessageTypeHuman, input),
+104 | 	}
+105 | 
+106 | 	var generatedText string
+107 | 	_, err := t.llm.GenerateContent(ctx, content,
+108 | 		llms.WithStreamingFunc(func(_ context.Context, chunk []byte) error {
+109 | 			generatedText += string(chunk)
+110 | 			return nil
+111 | 		}))
+112 | 	if err != nil {
+113 | 		if t.CallbacksHandler != nil {
+114 | 			t.CallbacksHandler.HandleToolError(ctx, err)
+115 | 		}
+116 | 		return "", err
+117 | 	}
+118 | 
+119 | 	if t.CallbacksHandler != nil {
+120 | 		t.CallbacksHandler.HandleToolEnd(ctx, generatedText)
+121 | 	}
+122 | 
+123 | 	return generatedText, nil
+124 | }
+125 | 
+
+
+--------------------------------------------------------------------------------
+/tools/perplexity/perplexity_test.go:
+--------------------------------------------------------------------------------
+ 1 | package perplexity
+ 2 | 
+ 3 | import (
+ 4 | 	"context"
+ 5 | 	"os"
+ 6 | 	"testing"
+ 7 | 
+ 8 | 	"github.com/stretchr/testify/assert"
+ 9 | 	"github.com/stretchr/testify/require"
+10 | )
+11 | 
+12 | func TestTool_Integration(t *testing.T) {
+13 | 	t.Parallel()
+14 | 
+15 | 	apiKey := os.Getenv("PERPLEXITY_API_KEY")
+16 | 	if apiKey == "" {
+17 | 		t.Skip("PERPLEXITY_API_KEY not set")
+18 | 	}
+19 | 
+20 | 	tool, err := New()
+21 | 	require.NoError(t, err)
+22 | 	require.NotNil(t, tool)
+23 | 
+24 | 	assert.Equal(t, "PerplexityAI", tool.Name())
+25 | 	assert.NotEmpty(t, tool.Description())
+26 | 
+27 | 	// Test Call functionality
+28 | 	ctx := context.Background()
+29 | 	response, err := tool.Call(ctx, "what is the largest country in the world by total area?")
+30 | 	require.NoError(t, err)
+31 | 	assert.Contains(t, response, "Russia")
+32 | }
+33 | 
+
+
+--------------------------------------------------------------------------------
+/tools/scraper/doc.go:
+--------------------------------------------------------------------------------
+1 | // Package scraper contains an implementation of the tool interface for
+2 | // a web scraping tool.
+3 | package scraper
+4 | 
+
+
+--------------------------------------------------------------------------------
+/tools/scraper/options.go:
+--------------------------------------------------------------------------------
+  1 | package scraper
+  2 | 
+  3 | type Options func(*Scraper)
+  4 | 
+  5 | // WithMaxDepth sets the maximum depth for the Scraper.
+  6 | //
+  7 | // Default value: 1
+  8 | //
+  9 | // maxDepth: the maximum depth to set.
+ 10 | // Returns: an Options function.
+ 11 | func WithMaxDepth(maxDepth int) Options {
+ 12 | 	return func(o *Scraper) {
+ 13 | 		o.MaxDepth = maxDepth
+ 14 | 	}
+ 15 | }
+ 16 | 
+ 17 | // WithParallelsNum sets the number of maximum allowed concurrent
+ 18 | // requests of the matching domains
+ 19 | //
+ 20 | // Default value: 2
+ 21 | //
+ 22 | // parallels: the number of parallels to set.
+ 23 | // Returns: the updated Scraper options.
+ 24 | func WithParallelsNum(parallels int) Options {
+ 25 | 	return func(o *Scraper) {
+ 26 | 		o.Parallels = parallels
+ 27 | 	}
+ 28 | }
+ 29 | 
+ 30 | // WithDelay creates an Options function that sets the delay of a Scraper.
+ 31 | //
+ 32 | // The delay parameter specifies the amount of time in milliseconds that
+ 33 | // the Scraper should wait between requests.
+ 34 | //
+ 35 | // Default value: 3
+ 36 | //
+ 37 | // delay: the delay to set.
+ 38 | // Returns: an Options function.
+ 39 | func WithDelay(delay int64) Options {
+ 40 | 	return func(o *Scraper) {
+ 41 | 		o.Delay = delay
+ 42 | 	}
+ 43 | }
+ 44 | 
+ 45 | // WithAsync sets the async option for the Scraper.
+ 46 | //
+ 47 | // Default value: true
+ 48 | 
+ 49 | // async: The boolean value indicating if the scraper should run asynchronously.
+ 50 | // Returns a function that sets the async option for the Scraper.
+ 51 | func WithAsync(async bool) Options {
+ 52 | 	return func(o *Scraper) {
+ 53 | 		o.Async = async
+ 54 | 	}
+ 55 | }
+ 56 | 
+ 57 | // WithNewBlacklist creates an Options function that replaces
+ 58 | // the list of url endpoints to be excluded from the scraping,
+ 59 | // with a new list.
+ 60 | //
+ 61 | // Default value:
+ 62 | //
+ 63 | //	[]string{
+ 64 | //		"login",
+ 65 | //		"signup",
+ 66 | //		"signin",
+ 67 | //		"register",
+ 68 | //		"logout",
+ 69 | //		"download",
+ 70 | //		"redirect",
+ 71 | //	},
+ 72 | //
+ 73 | // blacklist: slice of strings with url endpoints to be excluded from the scraping.
+ 74 | // Returns: an Options function.
+ 75 | func WithNewBlacklist(blacklist []string) Options {
+ 76 | 	return func(o *Scraper) {
+ 77 | 		o.Blacklist = blacklist
+ 78 | 	}
+ 79 | }
+ 80 | 
+ 81 | // WithBlacklist creates an Options function that appends
+ 82 | // the url endpoints to be excluded from the scraping,
+ 83 | // to the current list
+ 84 | //
+ 85 | // Default value:
+ 86 | //
+ 87 | //	[]string{
+ 88 | //		"login",
+ 89 | //		"signup",
+ 90 | //		"signin",
+ 91 | //		"register",
+ 92 | //		"logout",
+ 93 | //		"download",
+ 94 | //		"redirect",
+ 95 | //	},
+ 96 | //
+ 97 | // blacklist: slice of strings with url endpoints to be excluded from the scraping.
+ 98 | // Returns: an Options function.
+ 99 | func WithBlacklist(blacklist []string) Options {
+100 | 	return func(o *Scraper) {
+101 | 		o.Blacklist = append(o.Blacklist, blacklist...)
+102 | 	}
+103 | }
+104 | 
+
+
+--------------------------------------------------------------------------------
+/tools/scraper/scraper.go:
+--------------------------------------------------------------------------------
+  1 | package scraper
+  2 | 
+  3 | import (
+  4 | 	"context"
+  5 | 	"errors"
+  6 | 	"fmt"
+  7 | 	"net/url"
+  8 | 	"strings"
+  9 | 	"sync"
+ 10 | 	"time"
+ 11 | 
+ 12 | 	"github.com/gocolly/colly"
+ 13 | 	"github.com/tmc/langchaingo/tools"
+ 14 | )
+ 15 | 
+ 16 | const (
+ 17 | 	DefualtMaxDept   = 1
+ 18 | 	DefualtParallels = 2
+ 19 | 	DefualtDelay     = 3
+ 20 | 	DefualtAsync     = true
+ 21 | )
+ 22 | 
+ 23 | var ErrScrapingFailed = errors.New("scraper could not read URL, or scraping is not allowed for provided URL")
+ 24 | 
+ 25 | type Scraper struct {
+ 26 | 	MaxDepth  int
+ 27 | 	Parallels int
+ 28 | 	Delay     int64
+ 29 | 	Blacklist []string
+ 30 | 	Async     bool
+ 31 | }
+ 32 | 
+ 33 | var _ tools.Tool = Scraper{}
+ 34 | 
+ 35 | // New creates a new instance of Scraper with the provided options.
+ 36 | //
+ 37 | // The options parameter is a variadic argument allowing the user to specify
+ 38 | // custom configuration options for the Scraper. These options can be
+ 39 | // functions that modify the Scraper's properties.
+ 40 | //
+ 41 | // The function returns a pointer to a Scraper instance and an error. The
+ 42 | // error value is nil if the Scraper is created successfully.
+ 43 | func New(options ...Options) (*Scraper, error) {
+ 44 | 	scraper := &Scraper{
+ 45 | 		MaxDepth:  DefualtMaxDept,
+ 46 | 		Parallels: DefualtParallels,
+ 47 | 		Delay:     int64(DefualtDelay),
+ 48 | 		Async:     DefualtAsync,
+ 49 | 		Blacklist: []string{
+ 50 | 			"login",
+ 51 | 			"signup",
+ 52 | 			"signin",
+ 53 | 			"register",
+ 54 | 			"logout",
+ 55 | 			"download",
+ 56 | 			"redirect",
+ 57 | 		},
+ 58 | 	}
+ 59 | 
+ 60 | 	for _, opt := range options {
+ 61 | 		opt(scraper)
+ 62 | 	}
+ 63 | 
+ 64 | 	return scraper, nil
+ 65 | }
+ 66 | 
+ 67 | // Name returns the name of the Scraper.
+ 68 | //
+ 69 | // No parameters.
+ 70 | // Returns a string.
+ 71 | func (s Scraper) Name() string {
+ 72 | 	return "Web Scraper"
+ 73 | }
+ 74 | 
+ 75 | // Description returns the description of the Go function.
+ 76 | //
+ 77 | // There are no parameters.
+ 78 | // It returns a string.
+ 79 | func (s Scraper) Description() string {
+ 80 | 	return `
+ 81 | 		Web Scraper will scan a url and return the content of the web page.
+ 82 | 		Input should be a working url.
+ 83 | 	`
+ 84 | }
+ 85 | 
+ 86 | // Call scrapes a website and returns the site data.
+ 87 | //
+ 88 | // The function takes a context.Context object for managing the execution
+ 89 | // context and a string input representing the URL of the website to be scraped.
+ 90 | // It returns a string containing the scraped data and an error if any.
+ 91 | //
+ 92 | //nolint:all
+ 93 | func (s Scraper) Call(ctx context.Context, input string) (string, error) {
+ 94 | 	_, err := url.ParseRequestURI(input)
+ 95 | 	if err != nil {
+ 96 | 		return "", fmt.Errorf("%s: %w", ErrScrapingFailed, err)
+ 97 | 	}
+ 98 | 
+ 99 | 	c := colly.NewCollector(
+100 | 		colly.MaxDepth(s.MaxDepth),
+101 | 		colly.Async(s.Async),
+102 | 	)
+103 | 
+104 | 	err = c.Limit(&colly.LimitRule{
+105 | 		DomainGlob:  "*",
+106 | 		Parallelism: s.Parallels,
+107 | 		Delay:       time.Duration(s.Delay) * time.Second,
+108 | 	})
+109 | 	if err != nil {
+110 | 		return "", fmt.Errorf("%s: %w", ErrScrapingFailed, err)
+111 | 	}
+112 | 
+113 | 	var siteData strings.Builder
+114 | 	homePageLinks := make(map[string]bool)
+115 | 	scrapedLinks := make(map[string]bool)
+116 | 	scrapedLinksMutex := sync.RWMutex{}
+117 | 
+118 | 	c.OnRequest(func(r *colly.Request) {
+119 | 		if ctx.Err() != nil {
+120 | 			r.Abort()
+121 | 		}
+122 | 	})
+123 | 
+124 | 	c.OnHTML("html", func(e *colly.HTMLElement) {
+125 | 		currentURL := e.Request.URL.String()
+126 | 
+127 | 		// Only process the page if it hasn't been visited yet
+128 | 		scrapedLinksMutex.Lock()
+129 | 		if !scrapedLinks[currentURL] {
+130 | 			scrapedLinks[currentURL] = true
+131 | 			scrapedLinksMutex.Unlock()
+132 | 
+133 | 			siteData.WriteString("\n\nPage URL: " + currentURL)
+134 | 
+135 | 			title := e.ChildText("title")
+136 | 			if title != "" {
+137 | 				siteData.WriteString("\nPage Title: " + title)
+138 | 			}
+139 | 
+140 | 			description := e.ChildAttr("meta[name=description]", "content")
+141 | 			if description != "" {
+142 | 				siteData.WriteString("\nPage Description: " + description)
+143 | 			}
+144 | 
+145 | 			siteData.WriteString("\nHeaders:")
+146 | 			e.ForEach("h1, h2, h3, h4, h5, h6", func(_ int, el *colly.HTMLElement) {
+147 | 				siteData.WriteString("\n" + el.Text)
+148 | 			})
+149 | 
+150 | 			siteData.WriteString("\nContent:")
+151 | 			e.ForEach("p", func(_ int, el *colly.HTMLElement) {
+152 | 				siteData.WriteString("\n" + el.Text)
+153 | 			})
+154 | 
+155 | 			if currentURL == input {
+156 | 				e.ForEach("a", func(_ int, el *colly.HTMLElement) {
+157 | 					link := el.Attr("href")
+158 | 					if link != "" && !homePageLinks[link] {
+159 | 						homePageLinks[link] = true
+160 | 						siteData.WriteString("\nLink: " + link)
+161 | 					}
+162 | 				})
+163 | 			}
+164 | 		} else {
+165 | 			scrapedLinksMutex.Unlock()
+166 | 		}
+167 | 	})
+168 | 
+169 | 	c.OnHTML("a[href]", func(e *colly.HTMLElement) {
+170 | 		link := e.Attr("href")
+171 | 		absoluteLink := e.Request.AbsoluteURL(link)
+172 | 
+173 | 		// Parse the link to get the hostname
+174 | 		u, err := url.Parse(absoluteLink)
+175 | 		if err != nil {
+176 | 			// Handle the error appropriately
+177 | 			return
+178 | 		}
+179 | 
+180 | 		// Check if the link's hostname matches the current request's hostname
+181 | 		if u.Hostname() != e.Request.URL.Hostname() {
+182 | 			return
+183 | 		}
+184 | 
+185 | 		// Check for redundant pages
+186 | 		for _, item := range s.Blacklist {
+187 | 			if strings.Contains(u.Path, item) {
+188 | 				return
+189 | 			}
+190 | 		}
+191 | 
+192 | 		// Normalize the path to treat '/' and '/index.html' as the same path
+193 | 		if u.Path == "/index.html" || u.Path == "" {
+194 | 			u.Path = "/"
+195 | 		}
+196 | 
+197 | 		// Only visit the page if it hasn't been visited yet
+198 | 		scrapedLinksMutex.RLock()
+199 | 		if !scrapedLinks[u.String()] {
+200 | 			scrapedLinksMutex.RUnlock()
+201 | 			err := c.Visit(u.String())
+202 | 			if err != nil {
+203 | 				siteData.WriteString(fmt.Sprintf("\nError following link %s: %v", link, err))
+204 | 			}
+205 | 		} else {
+206 | 			scrapedLinksMutex.RUnlock()
+207 | 		}
+208 | 	})
+209 | 
+210 | 	err = c.Visit(input)
+211 | 	if err != nil {
+212 | 		return "", fmt.Errorf("%s: %w", ErrScrapingFailed, err)
+213 | 	}
+214 | 
+215 | 	select {
+216 | 	case <-ctx.Done():
+217 | 		return "", ctx.Err()
+218 | 	default:
+219 | 		c.Wait()
+220 | 	}
+221 | 
+222 | 	// Append all scraped links
+223 | 	siteData.WriteString("\n\nScraped Links:")
+224 | 	for link := range scrapedLinks {
+225 | 		siteData.WriteString("\n" + link)
+226 | 	}
+227 | 
+228 | 	return siteData.String(), nil
+229 | }
+230 | 
+
+
+--------------------------------------------------------------------------------
+/tools/serpapi/doc.go:
+--------------------------------------------------------------------------------
+1 | // Package serpapi contains an implementation of the tool interface with the
+2 | // serapi.
+3 | package serpapi
+4 | 
+
+
+--------------------------------------------------------------------------------
+/tools/serpapi/internal/client.go:
+--------------------------------------------------------------------------------
+  1 | package internal
+  2 | 
+  3 | import (
+  4 | 	"bytes"
+  5 | 	"context"
+  6 | 	"encoding/json"
+  7 | 	"errors"
+  8 | 	"fmt"
+  9 | 	"io"
+ 10 | 	"net/http"
+ 11 | 	"net/url"
+ 12 | )
+ 13 | 
+ 14 | const _url = "https://serpapi.com/search"
+ 15 | 
+ 16 | var (
+ 17 | 	ErrNoGoodResult = errors.New("no good search results found")
+ 18 | 	ErrAPIError     = errors.New("error from SerpAPI")
+ 19 | )
+ 20 | 
+ 21 | type Client struct {
+ 22 | 	apiKey string
+ 23 | }
+ 24 | 
+ 25 | func New(apiKey string) *Client {
+ 26 | 	return &Client{
+ 27 | 		apiKey: apiKey,
+ 28 | 	}
+ 29 | }
+ 30 | 
+ 31 | func (s *Client) Search(ctx context.Context, query string) (string, error) {
+ 32 | 	params := make(url.Values)
+ 33 | 	params.Add("q", query)
+ 34 | 	params.Add("google_domain", "google.com")
+ 35 | 	params.Add("gl", "us")
+ 36 | 	params.Add("hl", "en")
+ 37 | 	params.Add("api_key", s.apiKey)
+ 38 | 
+ 39 | 	reqURL := fmt.Sprintf("%s?%s", _url, params.Encode())
+ 40 | 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+ 41 | 	if err != nil {
+ 42 | 		return "", fmt.Errorf("creating request in serpapi: %w", err)
+ 43 | 	}
+ 44 | 
+ 45 | 	res, err := http.DefaultClient.Do(req)
+ 46 | 	if err != nil {
+ 47 | 		return "", fmt.Errorf("doing response in serpapi: %w", err)
+ 48 | 	}
+ 49 | 	defer res.Body.Close()
+ 50 | 
+ 51 | 	buf := new(bytes.Buffer)
+ 52 | 	_, err = io.Copy(buf, res.Body)
+ 53 | 	if err != nil {
+ 54 | 		return "", fmt.Errorf("coping data in serpapi: %w", err)
+ 55 | 	}
+ 56 | 
+ 57 | 	var result map[string]interface{}
+ 58 | 	err = json.Unmarshal(buf.Bytes(), &result)
+ 59 | 	if err != nil {
+ 60 | 		return "", fmt.Errorf("unmarshal data in serpapi: %w", err)
+ 61 | 	}
+ 62 | 
+ 63 | 	return processResponse(result)
+ 64 | }
+ 65 | 
+ 66 | func processResponse(res map[string]interface{}) (string, error) {
+ 67 | 	if errorValue, ok := res["error"]; ok {
+ 68 | 		return "", fmt.Errorf("%w: %v", ErrAPIError, errorValue)
+ 69 | 	}
+ 70 | 	if res := getAnswerBox(res); res != "" {
+ 71 | 		return res, nil
+ 72 | 	}
+ 73 | 	if res := getSportResult(res); res != "" {
+ 74 | 		return res, nil
+ 75 | 	}
+ 76 | 	if res := getKnowledgeGraph(res); res != "" {
+ 77 | 		return res, nil
+ 78 | 	}
+ 79 | 	if res := getOrganicResult(res); res != "" {
+ 80 | 		return res, nil
+ 81 | 	}
+ 82 | 
+ 83 | 	return "", ErrNoGoodResult
+ 84 | }
+ 85 | 
+ 86 | func getAnswerBox(res map[string]interface{}) string {
+ 87 | 	answerBox, answerBoxExists := res["answer_box"].(map[string]interface{})
+ 88 | 	if answerBoxExists {
+ 89 | 		if answer, ok := answerBox["answer"].(string); ok {
+ 90 | 			return answer
+ 91 | 		}
+ 92 | 		if snippet, ok := answerBox["snippet"].(string); ok {
+ 93 | 			return snippet
+ 94 | 		}
+ 95 | 		snippetHighlightedWords, ok := answerBox["snippet_highlighted_words"].([]interface{})
+ 96 | 		if ok && len(snippetHighlightedWords) > 0 {
+ 97 | 			return fmt.Sprintf("%v", snippetHighlightedWords[0])
+ 98 | 		}
+ 99 | 	}
+100 | 
+101 | 	return ""
+102 | }
+103 | 
+104 | func getSportResult(res map[string]interface{}) string {
+105 | 	sportsResults, sportsResultsExists := res["sports_results"].(map[string]interface{})
+106 | 	if sportsResultsExists {
+107 | 		if gameSpotlight, ok := sportsResults["game_spotlight"].(string); ok {
+108 | 			return gameSpotlight
+109 | 		}
+110 | 	}
+111 | 
+112 | 	return ""
+113 | }
+114 | 
+115 | func getKnowledgeGraph(res map[string]interface{}) string {
+116 | 	knowledgeGraph, knowledgeGraphExists := res["knowledge_graph"].(map[string]interface{})
+117 | 	if knowledgeGraphExists {
+118 | 		if description, ok := knowledgeGraph["description"].(string); ok {
+119 | 			return description
+120 | 		}
+121 | 	}
+122 | 
+123 | 	return ""
+124 | }
+125 | 
+126 | func getOrganicResult(res map[string]interface{}) string {
+127 | 	organicResults, organicResultsExists := res["organic_results"].([]interface{})
+128 | 
+129 | 	if organicResultsExists && len(organicResults) > 0 {
+130 | 		organicResult, ok := organicResults[0].(map[string]interface{})
+131 | 		if ok {
+132 | 			if snippet, ok := organicResult["snippet"].(string); ok {
+133 | 				return snippet
+134 | 			}
+135 | 		}
+136 | 	}
+137 | 
+138 | 	return ""
+139 | }
+140 | 
+
+
+--------------------------------------------------------------------------------
+/tools/serpapi/options.go:
+--------------------------------------------------------------------------------
+ 1 | package serpapi
+ 2 | 
+ 3 | type options struct {
+ 4 | 	apiKey string
+ 5 | }
+ 6 | 
+ 7 | type Option func(*options)
+ 8 | 
+ 9 | // WithAPIKey passes the Serpapi API token to the client. If not set, the token
+10 | // is read from the SERPAPI_API_KEY environment variable.
+11 | func WithAPIKey(apiKey string) Option {
+12 | 	return func(opts *options) {
+13 | 		opts.apiKey = apiKey
+14 | 	}
+15 | }
+16 | 
+
+
+--------------------------------------------------------------------------------
+/tools/serpapi/serpapi.go:
+--------------------------------------------------------------------------------
+ 1 | package serpapi
+ 2 | 
+ 3 | import (
+ 4 | 	"context"
+ 5 | 	"errors"
+ 6 | 	"os"
+ 7 | 	"strings"
+ 8 | 
+ 9 | 	"github.com/tmc/langchaingo/callbacks"
+10 | 	"github.com/tmc/langchaingo/tools"
+11 | 	"github.com/tmc/langchaingo/tools/serpapi/internal"
+12 | )
+13 | 
+14 | var ErrMissingToken = errors.New("missing the serpapi API key, set it in the SERPAPI_API_KEY environment variable")
+15 | 
+16 | type Tool struct {
+17 | 	CallbacksHandler callbacks.Handler
+18 | 	client           *internal.Client
+19 | }
+20 | 
+21 | var _ tools.Tool = Tool{}
+22 | 
+23 | // New creates a new serpapi tool to search on internet.
+24 | func New(opts ...Option) (*Tool, error) {
+25 | 	options := &options{
+26 | 		apiKey: os.Getenv("SERPAPI_API_KEY"),
+27 | 	}
+28 | 
+29 | 	for _, opt := range opts {
+30 | 		opt(options)
+31 | 	}
+32 | 
+33 | 	if options.apiKey == "" {
+34 | 		return nil, ErrMissingToken
+35 | 	}
+36 | 
+37 | 	return &Tool{
+38 | 		client: internal.New(options.apiKey),
+39 | 	}, nil
+40 | }
+41 | 
+42 | func (t Tool) Name() string {
+43 | 	return "GoogleSearch"
+44 | }
+45 | 
+46 | func (t Tool) Description() string {
+47 | 	return `
+48 | 	"A wrapper around Google Search. "
+49 | 	"Useful for when you need to answer questions about current events. "
+50 | 	"Always one of the first options when you need to find information on internet"
+51 | 	"Input should be a search query."`
+52 | }
+53 | 
+54 | func (t Tool) Call(ctx context.Context, input string) (string, error) {
+55 | 	if t.CallbacksHandler != nil {
+56 | 		t.CallbacksHandler.HandleToolStart(ctx, input)
+57 | 	}
+58 | 
+59 | 	result, err := t.client.Search(ctx, input)
+60 | 	if err != nil {
+61 | 		if errors.Is(err, internal.ErrNoGoodResult) {
+62 | 			return "No good Google Search Results was found", nil
+63 | 		}
+64 | 
+65 | 		if t.CallbacksHandler != nil {
+66 | 			t.CallbacksHandler.HandleToolError(ctx, err)
+67 | 		}
+68 | 
+69 | 		return "", err
+70 | 	}
+71 | 
+72 | 	if t.CallbacksHandler != nil {
+73 | 		t.CallbacksHandler.HandleToolEnd(ctx, result)
+74 | 	}
+75 | 
+76 | 	return strings.Join(strings.Fields(result), " "), nil
+77 | }
+78 | 
+
+
+--------------------------------------------------------------------------------
+/tools/sqldatabase/mysql/mysql.go:
+--------------------------------------------------------------------------------
+  1 | package mysql
+  2 | 
+  3 | import (
+  4 | 	"context"
+  5 | 	"database/sql"
+  6 | 	"fmt"
+  7 | 
+  8 | 	_ "github.com/go-sql-driver/mysql" // mysql driver
+  9 | 	"github.com/tmc/langchaingo/tools/sqldatabase"
+ 10 | )
+ 11 | 
+ 12 | const EngineName = "mysql"
+ 13 | 
+ 14 | //nolint:gochecknoinits
+ 15 | func init() {
+ 16 | 	sqldatabase.RegisterEngine(EngineName, NewMySQL)
+ 17 | }
+ 18 | 
+ 19 | var _ sqldatabase.Engine = MySQL{}
+ 20 | 
+ 21 | // MySQL is a MySQL engine.
+ 22 | type MySQL struct {
+ 23 | 	db *sql.DB
+ 24 | }
+ 25 | 
+ 26 | // NewMySQL creates a new MySQL engine.
+ 27 | // The dsn is the data source name.(e.g. root:password@tcp(localhost:3306)/test).
+ 28 | func NewMySQL(dsn string) (sqldatabase.Engine, error) { //nolint:ireturn
+ 29 | 	db, err := sql.Open(EngineName, dsn)
+ 30 | 	if err != nil {
+ 31 | 		return nil, err
+ 32 | 	}
+ 33 | 	db.SetMaxOpenConns(32) //nolint:gomnd
+ 34 | 
+ 35 | 	return &MySQL{
+ 36 | 		db: db,
+ 37 | 	}, nil
+ 38 | }
+ 39 | 
+ 40 | func (m MySQL) Dialect() string {
+ 41 | 	return EngineName
+ 42 | }
+ 43 | 
+ 44 | func (m MySQL) Query(ctx context.Context, query string, args ...any) ([]string, [][]string, error) {
+ 45 | 	rows, err := m.db.QueryContext(ctx, query, args...)
+ 46 | 	if err != nil {
+ 47 | 		return nil, nil, err
+ 48 | 	}
+ 49 | 	if err := rows.Err(); err != nil {
+ 50 | 		return nil, nil, err
+ 51 | 	}
+ 52 | 	defer rows.Close()
+ 53 | 	cols, err := rows.Columns()
+ 54 | 	if err != nil {
+ 55 | 		return nil, nil, err
+ 56 | 	}
+ 57 | 	results := make([][]string, 0)
+ 58 | 	for rows.Next() {
+ 59 | 		row := make([]string, len(cols))
+ 60 | 		rowNullable := make([]sql.NullString, len(cols))
+ 61 | 		rowPtrs := make([]interface{}, len(cols))
+ 62 | 		for i := range row {
+ 63 | 			rowPtrs[i] = &rowNullable[i]
+ 64 | 		}
+ 65 | 		err = rows.Scan(rowPtrs...)
+ 66 | 		if err != nil {
+ 67 | 			return nil, nil, err
+ 68 | 		}
+ 69 | 		for i := range rowNullable {
+ 70 | 			row[i] = rowNullable[i].String
+ 71 | 		}
+ 72 | 		results = append(results, row)
+ 73 | 	}
+ 74 | 	return cols, results, nil
+ 75 | }
+ 76 | 
+ 77 | func (m MySQL) TableNames(ctx context.Context) ([]string, error) {
+ 78 | 	_, result, err := m.Query(ctx, "SHOW TABLES")
+ 79 | 	if err != nil {
+ 80 | 		return nil, err
+ 81 | 	}
+ 82 | 	ret := make([]string, 0, len(result))
+ 83 | 	for _, row := range result {
+ 84 | 		ret = append(ret, row[0])
+ 85 | 	}
+ 86 | 	return ret, nil
+ 87 | }
+ 88 | 
+ 89 | func (m MySQL) TableInfo(ctx context.Context, table string) (string, error) {
+ 90 | 	_, result, err := m.Query(ctx, fmt.Sprintf("SHOW CREATE TABLE %s", table))
+ 91 | 	if err != nil {
+ 92 | 		return "", err
+ 93 | 	}
+ 94 | 	if len(result) == 0 {
+ 95 | 		return "", sqldatabase.ErrTableNotFound
+ 96 | 	}
+ 97 | 	if len(result[0]) < 2 { //nolint:gomnd
+ 98 | 		return "", sqldatabase.ErrInvalidResult
+ 99 | 	}
+100 | 
+101 | 	return result[0][1], nil //nolint:gomnd
+102 | }
+103 | 
+104 | func (m MySQL) Close() error {
+105 | 	return m.db.Close()
+106 | }
+107 | 
+
+
+--------------------------------------------------------------------------------
+/tools/sqldatabase/mysql/mysql_test.go:
+--------------------------------------------------------------------------------
+ 1 | package mysql_test
+ 2 | 
+ 3 | import (
+ 4 | 	"context"
+ 5 | 	"database/sql"
+ 6 | 	"errors"
+ 7 | 	"fmt"
+ 8 | 	"os"
+ 9 | 	"path/filepath"
+10 | 	"strings"
+11 | 	"testing"
+12 | 
+13 | 	"github.com/stretchr/testify/require"
+14 | 	"github.com/testcontainers/testcontainers-go"
+15 | 	"github.com/testcontainers/testcontainers-go/modules/mysql"
+16 | 	"github.com/tmc/langchaingo/tools/sqldatabase"
+17 | 	_ "github.com/tmc/langchaingo/tools/sqldatabase/mysql"
+18 | )
+19 | 
+20 | func Test(t *testing.T) {
+21 | 	t.Parallel()
+22 | 
+23 | 	// export LANGCHAINGO_TEST_MYSQL=user:p@ssw0rd@tcp(localhost:3306)/test
+24 | 	mysqlURI := os.Getenv("LANGCHAINGO_TEST_MYSQL")
+25 | 	if mysqlURI == "" {
+26 | 		mysqlContainer, err := mysql.RunContainer(
+27 | 			context.Background(),
+28 | 			testcontainers.WithImage("mysql:8.3.0"),
+29 | 			mysql.WithDatabase("test"),
+30 | 			mysql.WithUsername("user"),
+31 | 			mysql.WithPassword("p@ssw0rd"),
+32 | 			mysql.WithScripts(filepath.Join("..", "testdata", "db.sql")),
+33 | 		)
+34 | 		// if error is no docker socket available, skip the test
+35 | 		if err != nil && strings.Contains(err.Error(), "Cannot connect to the Docker daemon") {
+36 | 			t.Skip("Docker not available")
+37 | 		}
+38 | 		require.NoError(t, err)
+39 | 		defer func() {
+40 | 			require.NoError(t, mysqlContainer.Terminate(context.Background()))
+41 | 		}()
+42 | 
+43 | 		mysqlURI, err = mysqlContainer.ConnectionString(context.Background())
+44 | 		require.NoError(t, err)
+45 | 	}
+46 | 
+47 | 	db, err := sqldatabase.NewSQLDatabaseWithDSN("mysql", mysqlURI, nil)
+48 | 	require.NoError(t, err)
+49 | 
+50 | 	tbs := db.TableNames()
+51 | 	require.NotEmpty(t, tbs)
+52 | 
+53 | 	desc, err := db.TableInfo(context.Background(), tbs)
+54 | 	require.NoError(t, err)
+55 | 
+56 | 	t.Log(desc)
+57 | 
+58 | 	for _, tableName := range tbs {
+59 | 		_, err = db.Query(context.Background(), fmt.Sprintf("SELECT * from %s LIMIT 1", tableName))
+60 | 		/* exclude no row error,
+61 | 		since we only need to check if db.Query function can perform query correctly*/
+62 | 		if errors.Is(err, sql.ErrNoRows) {
+63 | 			continue
+64 | 		}
+65 | 		require.NoError(t, err)
+66 | 	}
+67 | }
+68 | 
+
+
+--------------------------------------------------------------------------------
+/tools/sqldatabase/postgresql/postgresql.go:
+--------------------------------------------------------------------------------
+  1 | package postgresql
+  2 | 
+  3 | import (
+  4 | 	"context"
+  5 | 	"database/sql"
+  6 | 
+  7 | 	_ "github.com/jackc/pgx/v5/stdlib" // postgresql driver
+  8 | 	"github.com/tmc/langchaingo/tools/sqldatabase"
+  9 | )
+ 10 | 
+ 11 | const EngineName = "pgx"
+ 12 | 
+ 13 | // init registers the PostgreSQL engine with the sqldatabase package.
+ 14 | // It is automatically called during package initialization.
+ 15 | //
+ 16 | //nolint:gochecknoinits
+ 17 | func init() {
+ 18 | 	sqldatabase.RegisterEngine(EngineName, NewPostgreSQL)
+ 19 | }
+ 20 | 
+ 21 | var _ sqldatabase.Engine = PostgreSQL{}
+ 22 | 
+ 23 | // PostgreSQL represents the PostgreSQL engine.
+ 24 | type PostgreSQL struct {
+ 25 | 	db *sql.DB
+ 26 | }
+ 27 | 
+ 28 | // NewPostgreSQL creates a new PostgreSQL engine instance.
+ 29 | // The dsn parameter is the data source name
+ 30 | // (e.g. postgres://db_user:mysecretpassword@localhost:5438/test?sslmode=disable).
+ 31 | // It returns a sqldatabase.Engine and an error, if any.
+ 32 | func NewPostgreSQL(dsn string) (sqldatabase.Engine, error) { //nolint:ireturn
+ 33 | 	db, err := sql.Open(EngineName, dsn)
+ 34 | 	if err != nil {
+ 35 | 		return nil, err
+ 36 | 	}
+ 37 | 
+ 38 | 	return &PostgreSQL{
+ 39 | 		db: db,
+ 40 | 	}, nil
+ 41 | }
+ 42 | 
+ 43 | // Dialect returns the dialect of the PostgreSQL engine.
+ 44 | func (p PostgreSQL) Dialect() string {
+ 45 | 	return EngineName
+ 46 | }
+ 47 | 
+ 48 | // Query executes a query on the PostgreSQL engine.
+ 49 | // It takes a context.Context, a query string, and optional query arguments.
+ 50 | // It returns the column names, query results as a 2D slice of strings, and an error, if any.
+ 51 | func (p PostgreSQL) Query(ctx context.Context, query string, args ...any) ([]string, [][]string, error) {
+ 52 | 	rows, err := p.db.QueryContext(ctx, query, args...)
+ 53 | 	if err != nil {
+ 54 | 		return nil, nil, err
+ 55 | 	}
+ 56 | 	if err := rows.Err(); err != nil {
+ 57 | 		return nil, nil, err
+ 58 | 	}
+ 59 | 	defer rows.Close()
+ 60 | 	cols, err := rows.Columns()
+ 61 | 	if err != nil {
+ 62 | 		return nil, nil, err
+ 63 | 	}
+ 64 | 	results := make([][]string, 0)
+ 65 | 	for rows.Next() {
+ 66 | 		row := make([]string, len(cols))
+ 67 | 		rowNullable := make([]sql.NullString, len(cols))
+ 68 | 		rowPtrs := make([]interface{}, len(cols))
+ 69 | 		for i := range row {
+ 70 | 			rowPtrs[i] = &rowNullable[i]
+ 71 | 		}
+ 72 | 		err = rows.Scan(rowPtrs...)
+ 73 | 		if err != nil {
+ 74 | 			return nil, nil, err
+ 75 | 		}
+ 76 | 		for i := range rowNullable {
+ 77 | 			row[i] = rowNullable[i].String
+ 78 | 		}
+ 79 | 		results = append(results, row)
+ 80 | 	}
+ 81 | 	return cols, results, nil
+ 82 | }
+ 83 | 
+ 84 | // TableNames returns the names of all tables in the PostgreSQL database.
+ 85 | // It takes a context.Context.
+ 86 | // It returns a slice of table names and an error, if any.
+ 87 | func (p PostgreSQL) TableNames(ctx context.Context) ([]string, error) {
+ 88 | 	_, result, err := p.Query(ctx,
+ 89 | 		`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`)
+ 90 | 	if err != nil {
+ 91 | 		return nil, err
+ 92 | 	}
+ 93 | 	ret := make([]string, 0, len(result))
+ 94 | 	for _, row := range result {
+ 95 | 		ret = append(ret, row[0])
+ 96 | 	}
+ 97 | 	return ret, nil
+ 98 | }
+ 99 | 
+100 | // TableInfo returns information about a specific table in the PostgreSQL database.
+101 | // It takes a context.Context and the name of the table.
+102 | // It returns the table name and an error, if any.
+103 | func (p PostgreSQL) TableInfo(ctx context.Context, table string) (string, error) {
+104 | 	_, result, err := p.Query(ctx, `SELECT 
+105 | 		table_name, 
+106 | 		column_name, 
+107 | 		data_type 
+108 | 	 FROM 
+109 | 		information_schema.columns
+110 | 	 WHERE 
+111 | 		table_name = $1`, table)
+112 | 	if err != nil {
+113 | 		return "", err
+114 | 	}
+115 | 	if len(result) == 0 {
+116 | 		return "", sqldatabase.ErrTableNotFound
+117 | 	}
+118 | 	if len(result[0]) < 2 { //nolint:gomnd
+119 | 		return "", sqldatabase.ErrInvalidResult
+120 | 	}
+121 | 
+122 | 	return result[0][1], nil //nolint:gomnd
+123 | }
+124 | 
+125 | // Close closes the connection to the PostgreSQL database.
+126 | // It returns an error, if any.
+127 | func (p PostgreSQL) Close() error {
+128 | 	return p.db.Close()
+129 | }
+130 | 
+
+
+--------------------------------------------------------------------------------
+/tools/sqldatabase/postgresql/postgresql_test.go:
+--------------------------------------------------------------------------------
+ 1 | package postgresql_test
+ 2 | 
+ 3 | import (
+ 4 | 	"context"
+ 5 | 	"database/sql"
+ 6 | 	"errors"
+ 7 | 	"fmt"
+ 8 | 	"os"
+ 9 | 	"path/filepath"
+10 | 	"strings"
+11 | 	"testing"
+12 | 	"time"
+13 | 
+14 | 	"github.com/stretchr/testify/require"
+15 | 	"github.com/testcontainers/testcontainers-go"
+16 | 	"github.com/testcontainers/testcontainers-go/modules/postgres"
+17 | 	"github.com/testcontainers/testcontainers-go/wait"
+18 | 	"github.com/tmc/langchaingo/tools/sqldatabase"
+19 | )
+20 | 
+21 | func Test(t *testing.T) {
+22 | 	t.Parallel()
+23 | 
+24 | 	// export LANGCHAINGO_TEST_POSTGRESQL=postgres://db_user:mysecretpassword@localhost:5438/test?sslmode=disable
+25 | 	pgURI := os.Getenv("LANGCHAINGO_TEST_POSTGRESQL")
+26 | 	if pgURI == "" {
+27 | 		pgContainer, err := postgres.RunContainer(
+28 | 			context.Background(),
+29 | 			testcontainers.WithImage("postgres:16.2"),
+30 | 			postgres.WithDatabase("test"),
+31 | 			postgres.WithUsername("db_user"),
+32 | 			postgres.WithPassword("p@mysecretpassword"),
+33 | 			postgres.WithInitScripts(filepath.Join("..", "testdata", "db.sql")),
+34 | 			testcontainers.WithWaitStrategy(
+35 | 				wait.ForLog("database system is ready to accept connections").
+36 | 					WithOccurrence(2).
+37 | 					WithStartupTimeout(5*time.Second)),
+38 | 		)
+39 | 		if err != nil && strings.Contains(err.Error(), "Cannot connect to the Docker daemon") {
+40 | 			t.Skip("Docker not available")
+41 | 		}
+42 | 		require.NoError(t, err)
+43 | 		defer func() {
+44 | 			require.NoError(t, pgContainer.Terminate(context.Background()))
+45 | 		}()
+46 | 
+47 | 		pgURI, err = pgContainer.ConnectionString(context.Background(), "sslmode=disable")
+48 | 		require.NoError(t, err)
+49 | 	}
+50 | 
+51 | 	db, err := sqldatabase.NewSQLDatabaseWithDSN("pgx", pgURI, nil)
+52 | 	require.NoError(t, err)
+53 | 
+54 | 	tbs := db.TableNames()
+55 | 	require.NotEmpty(t, tbs)
+56 | 
+57 | 	desc, err := db.TableInfo(context.Background(), tbs)
+58 | 	require.NoError(t, err)
+59 | 
+60 | 	t.Log(desc)
+61 | 
+62 | 	for _, tableName := range tbs {
+63 | 		_, err = db.Query(context.Background(), fmt.Sprintf("SELECT * from %s LIMIT 1", tableName))
+64 | 		/* exclude no row error,
+65 | 		since we only need to check if db.Query function can perform query correctly*/
+66 | 		if errors.Is(err, sql.ErrNoRows) {
+67 | 			continue
+68 | 		}
+69 | 		require.NoError(t, err)
+70 | 	}
+71 | }
+72 | 
+
+
+--------------------------------------------------------------------------------
+/tools/sqldatabase/sql_database.go:
+--------------------------------------------------------------------------------
+  1 | package sqldatabase
+  2 | 
+  3 | import (
+  4 | 	"context"
+  5 | 	"fmt"
+  6 | 	"strings"
+  7 | 	"time"
+  8 | )
+  9 | 
+ 10 | // EngineFunc is the function that returns the database engine.
+ 11 | type EngineFunc func(string) (Engine, error)
+ 12 | 
+ 13 | //nolint:gochecknoglobals
+ 14 | var engines = make(map[string]EngineFunc)
+ 15 | 
+ 16 | func RegisterEngine(name string, engineFunc EngineFunc) {
+ 17 | 	engines[name] = engineFunc
+ 18 | }
+ 19 | 
+ 20 | // Engine is the interface that wraps the database.
+ 21 | type Engine interface {
+ 22 | 	// Dialect returns the dialect(e.g. mysql, sqlite, postgre) of the database.
+ 23 | 	Dialect() string
+ 24 | 
+ 25 | 	// Query executes the query and returns the columns and results.
+ 26 | 	Query(ctx context.Context, query string, args ...any) (cols []string, results [][]string, err error)
+ 27 | 
+ 28 | 	// TableNames returns all the table names of the database.
+ 29 | 	TableNames(ctx context.Context) ([]string, error)
+ 30 | 
+ 31 | 	// TableInfo returns the table information of the database.
+ 32 | 	// Typically, it returns the CREATE TABLE statement.
+ 33 | 	TableInfo(ctx context.Context, tables string) (string, error)
+ 34 | 
+ 35 | 	// Close closes the database.
+ 36 | 	Close() error
+ 37 | }
+ 38 | 
+ 39 | var (
+ 40 | 	ErrUnknownDialect = fmt.Errorf("unknown dialect")
+ 41 | 
+ 42 | 	ErrTableNotFound = fmt.Errorf("table not found")
+ 43 | 	ErrInvalidResult = fmt.Errorf("invalid result")
+ 44 | )
+ 45 | 
+ 46 | // SQLDatabase sql wrapper.
+ 47 | type SQLDatabase struct {
+ 48 | 	Engine           Engine // The database engine.
+ 49 | 	SampleRowsNumber int    // The number of sample rows to show. 0 means no sample rows.
+ 50 | 	allTables        []string
+ 51 | }
+ 52 | 
+ 53 | // NewSQLDatabase creates a new SQLDatabase.
+ 54 | func NewSQLDatabase(engine Engine, ignoreTables map[string]struct{}) (*SQLDatabase, error) {
+ 55 | 	sd := &SQLDatabase{
+ 56 | 		Engine:           engine,
+ 57 | 		SampleRowsNumber: 3, //nolint:gomnd
+ 58 | 	}
+ 59 | 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) //nolint:gomnd
+ 60 | 	defer cancel()
+ 61 | 	tbs, err := engine.TableNames(ctx)
+ 62 | 	if err != nil {
+ 63 | 		return nil, err
+ 64 | 	}
+ 65 | 	for _, tb := range tbs {
+ 66 | 		if _, ok := ignoreTables[tb]; ok {
+ 67 | 			continue
+ 68 | 		}
+ 69 | 		sd.allTables = append(sd.allTables, tb)
+ 70 | 	}
+ 71 | 
+ 72 | 	return sd, nil
+ 73 | }
+ 74 | 
+ 75 | // NewSQLDatabaseWithDSN creates a new SQLDatabase with the data source name.
+ 76 | func NewSQLDatabaseWithDSN(dialect, dsn string, ignoreTables map[string]struct{}) (*SQLDatabase, error) {
+ 77 | 	engineFunc, ok := engines[dialect]
+ 78 | 	if !ok {
+ 79 | 		return nil, ErrUnknownDialect
+ 80 | 	}
+ 81 | 	engine, err := engineFunc(dsn)
+ 82 | 	if err != nil {
+ 83 | 		return nil, err
+ 84 | 	}
+ 85 | 	return NewSQLDatabase(engine, ignoreTables)
+ 86 | }
+ 87 | 
+ 88 | // Dialect returns the dialect(e.g. mysql, sqlite, postgre) of the database.
+ 89 | func (sd *SQLDatabase) Dialect() string {
+ 90 | 	return sd.Engine.Dialect()
+ 91 | }
+ 92 | 
+ 93 | // TableNames returns all the table names of the database.
+ 94 | func (sd *SQLDatabase) TableNames() []string {
+ 95 | 	return sd.allTables
+ 96 | }
+ 97 | 
+ 98 | // TableInfo returns the table information string of the database.
+ 99 | // If tables is empty, it will return all the tables, otherwise it will return the given tables.
+100 | func (sd *SQLDatabase) TableInfo(ctx context.Context, tables []string) (string, error) {
+101 | 	if len(tables) == 0 {
+102 | 		tables = sd.allTables
+103 | 	}
+104 | 	str := ""
+105 | 	for _, tb := range tables {
+106 | 		// Get table info
+107 | 		info, err := sd.Engine.TableInfo(ctx, tb)
+108 | 		if err != nil {
+109 | 			return "", err
+110 | 		}
+111 | 		str += info + "\n\n"
+112 | 
+113 | 		// Get sample rows
+114 | 		if sd.SampleRowsNumber > 0 {
+115 | 			sampleRows, err := sd.sampleRows(ctx, tb, sd.SampleRowsNumber)
+116 | 			if err != nil {
+117 | 				return "", err
+118 | 			}
+119 | 			str += "/*\n" + sampleRows + "*/ \n\n"
+120 | 		}
+121 | 	}
+122 | 
+123 | 	return str, nil
+124 | }
+125 | 
+126 | // Query executes the query and returns the string that contains columns and results.
+127 | func (sd *SQLDatabase) Query(ctx context.Context, query string) (string, error) {
+128 | 	cols, results, err := sd.Engine.Query(ctx, query)
+129 | 	if err != nil {
+130 | 		return "", err
+131 | 	}
+132 | 
+133 | 	str := strings.Join(cols, "\t") + "\n"
+134 | 	for _, row := range results {
+135 | 		str += strings.Join(row, "\t") + "\n"
+136 | 	}
+137 | 	return str, nil
+138 | }
+139 | 
+140 | // Close closes the database.
+141 | func (sd *SQLDatabase) Close() error {
+142 | 	return sd.Engine.Close()
+143 | }
+144 | 
+145 | func (sd *SQLDatabase) sampleRows(ctx context.Context, table string, rows int) (string, error) {
+146 | 	query := fmt.Sprintf("SELECT * FROM %s LIMIT %d", table, rows)
+147 | 	result, err := sd.Query(ctx, query)
+148 | 	if err != nil {
+149 | 		return "", err
+150 | 	}
+151 | 	ret := fmt.Sprintf("%d rows from %s table:\n", rows, table)
+152 | 	ret += result
+153 | 	return ret, nil
+154 | }
+155 | 
+
+
+--------------------------------------------------------------------------------
+/tools/sqldatabase/sqlite3/sqlite3.go:
+--------------------------------------------------------------------------------
+  1 | package sqlite3
+  2 | 
+  3 | import (
+  4 | 	"context"
+  5 | 	"database/sql"
+  6 | 
+  7 | 	_ "github.com/mattn/go-sqlite3" // sqlite3 driver
+  8 | 	"github.com/tmc/langchaingo/tools/sqldatabase"
+  9 | )
+ 10 | 
+ 11 | const EngineName = "sqlite3"
+ 12 | 
+ 13 | //nolint:gochecknoinits
+ 14 | func init() {
+ 15 | 	sqldatabase.RegisterEngine(EngineName, NewSQLite3)
+ 16 | }
+ 17 | 
+ 18 | var _ sqldatabase.Engine = SQLite3{}
+ 19 | 
+ 20 | // SQLite3 is a SQLite3 engine.
+ 21 | type SQLite3 struct {
+ 22 | 	db *sql.DB
+ 23 | }
+ 24 | 
+ 25 | // NewSQLite3 creates a new SQLite3 engine.
+ 26 | // The dsn is the data source name.(e.g. file:locked.sqlite?cache=shared).
+ 27 | func NewSQLite3(dsn string) (sqldatabase.Engine, error) { //nolint:ireturn
+ 28 | 	db, err := sql.Open(EngineName, dsn)
+ 29 | 	if err != nil {
+ 30 | 		return nil, err
+ 31 | 	}
+ 32 | 	db.SetMaxOpenConns(1)
+ 33 | 
+ 34 | 	return &SQLite3{
+ 35 | 		db: db,
+ 36 | 	}, nil
+ 37 | }
+ 38 | 
+ 39 | func (m SQLite3) Dialect() string {
+ 40 | 	return EngineName
+ 41 | }
+ 42 | 
+ 43 | func (m SQLite3) Query(ctx context.Context, query string, args ...any) ([]string, [][]string, error) {
+ 44 | 	rows, err := m.db.QueryContext(ctx, query, args...)
+ 45 | 	if err != nil {
+ 46 | 		return nil, nil, err
+ 47 | 	}
+ 48 | 	if err := rows.Err(); err != nil {
+ 49 | 		return nil, nil, err
+ 50 | 	}
+ 51 | 	defer rows.Close()
+ 52 | 	cols, err := rows.Columns()
+ 53 | 	if err != nil {
+ 54 | 		return nil, nil, err
+ 55 | 	}
+ 56 | 	results := make([][]string, 0)
+ 57 | 	for rows.Next() {
+ 58 | 		row := make([]string, len(cols))
+ 59 | 		rowNullable := make([]sql.NullString, len(cols))
+ 60 | 		rowPtrs := make([]interface{}, len(cols))
+ 61 | 		for i := range row {
+ 62 | 			rowPtrs[i] = &rowNullable[i]
+ 63 | 		}
+ 64 | 		err = rows.Scan(rowPtrs...)
+ 65 | 		if err != nil {
+ 66 | 			return nil, nil, err
+ 67 | 		}
+ 68 | 		for i := range rowNullable {
+ 69 | 			row[i] = rowNullable[i].String
+ 70 | 		}
+ 71 | 		results = append(results, row)
+ 72 | 	}
+ 73 | 	return cols, results, nil
+ 74 | }
+ 75 | 
+ 76 | func (m SQLite3) TableNames(ctx context.Context) ([]string, error) {
+ 77 | 	_, result, err := m.Query(ctx, "SELECT name FROM sqlite_master WHERE type='table';")
+ 78 | 	if err != nil {
+ 79 | 		return nil, err
+ 80 | 	}
+ 81 | 	ret := make([]string, 0, len(result))
+ 82 | 	for _, row := range result {
+ 83 | 		ret = append(ret, row[0])
+ 84 | 	}
+ 85 | 	return ret, nil
+ 86 | }
+ 87 | 
+ 88 | func (m SQLite3) TableInfo(ctx context.Context, table string) (string, error) {
+ 89 | 	_, result, err := m.Query(ctx, "SELECT sql FROM sqlite_master WHERE type='table' AND name=?;", table)
+ 90 | 	if err != nil {
+ 91 | 		return "", err
+ 92 | 	}
+ 93 | 	if len(result) == 0 {
+ 94 | 		return "", sqldatabase.ErrTableNotFound
+ 95 | 	}
+ 96 | 	if len(result[0]) < 1 {
+ 97 | 		return "", sqldatabase.ErrInvalidResult
+ 98 | 	}
+ 99 | 
+100 | 	return result[0][0], nil
+101 | }
+102 | 
+103 | func (m SQLite3) Close() error {
+104 | 	return m.db.Close()
+105 | }
+106 | 
+
+
+--------------------------------------------------------------------------------
+/tools/sqldatabase/sqlite3/sqlite3_test.go:
+--------------------------------------------------------------------------------
+ 1 | package sqlite3_test
+ 2 | 
+ 3 | import (
+ 4 | 	"context"
+ 5 | 	"database/sql"
+ 6 | 	"errors"
+ 7 | 	"fmt"
+ 8 | 	"os"
+ 9 | 	"strings"
+10 | 	"testing"
+11 | 
+12 | 	"github.com/stretchr/testify/require"
+13 | 	"github.com/tmc/langchaingo/tools/sqldatabase"
+14 | 	_ "github.com/tmc/langchaingo/tools/sqldatabase/sqlite3"
+15 | )
+16 | 
+17 | func Test(t *testing.T) {
+18 | 	t.Parallel()
+19 | 
+20 | 	const dsn = `test.sqlite`
+21 | 	os.Remove(dsn)
+22 | 	defer os.Remove(dsn)
+23 | 
+24 | 	// Create some example data
+25 | 	tmpDB, err := sql.Open("sqlite3", dsn+"?cache=shared")
+26 | 	require.NoError(t, err)
+27 | 
+28 | 	_, err = tmpDB.Exec("CREATE TABLE `Activity` (\n  `Id` int,\n  `StringId` text,\n  `Note` text,\n  `TimeType` text,\n  `DayOfWeek` text,\n  `Year` text,\n  `Month` text,\n  `Day` text,\n  `Hour` text,\n  `Minute` text,\n  `Second` text,\n  `Duration` int\n) ") //nolint:lll
+29 | 	require.NoError(t, err)
+30 | 	_, err = tmpDB.Exec("CREATE TABLE `Activity1` (\n  `Id` int,\n  `StringId` text,\n  `Note` text,\n  `TimeType` text,\n  `DayOfWeek` text,\n  `Year` text,\n  `Month` text,\n  `Day` text,\n  `Hour` text,\n  `Minute` text,\n  `Second` text,\n  `Duration` int\n)  ") //nolint:lll
+31 | 	require.NoError(t, err)
+32 | 	_, err = tmpDB.Exec("CREATE TABLE `Activity2` (\n  `Id` int,\n  `StringId` text,\n  `Note` text,\n  `TimeType` text,\n  `DayOfWeek` text,\n  `Year` text,\n  `Month` text,\n  `Day` text,\n  `Hour` text,\n  `Minute` text,\n  `Second` text,\n  `Duration` int\n)  ") //nolint:lll
+33 | 	require.NoError(t, err)
+34 | 	tmpDB.Close()
+35 | 
+36 | 	db, err := sqldatabase.NewSQLDatabaseWithDSN("sqlite3", dsn, nil)
+37 | 	require.NoError(t, err)
+38 | 	defer db.Close()
+39 | 
+40 | 	tbs := db.TableNames()
+41 | 	require.Len(t, tbs, 3)
+42 | 
+43 | 	desc, err := db.TableInfo(context.Background(), tbs)
+44 | 	require.NoError(t, err)
+45 | 
+46 | 	desc = strings.TrimSpace(desc)
+47 | 	require.Equal(t, 0, strings.Index(desc, "CREATE TABLE")) //nolint:stylecheck
+48 | 	require.True(t, strings.Contains(desc, "Activity"))      //nolint:stylecheck
+49 | 	require.True(t, strings.Contains(desc, "Activity1"))     //nolint:stylecheck
+50 | 	require.True(t, strings.Contains(desc, "Activity2"))     //nolint:stylecheck
+51 | 
+52 | 	for _, tableName := range tbs {
+53 | 		_, err = db.Query(context.Background(), fmt.Sprintf("SELECT * from %s LIMIT 1", tableName))
+54 | 		/* exclude no row error,
+55 | 		since we only need to check if db.Query function can perform query correctly*/
+56 | 		if errors.Is(err, sql.ErrNoRows) {
+57 | 			continue
+58 | 		}
+59 | 		require.NoError(t, err)
+60 | 	}
+61 | }
+62 | 
+
+
+--------------------------------------------------------------------------------
+/tools/sqldatabase/testdata/db.sql:
+--------------------------------------------------------------------------------
+ 1 | CREATE TABLE Activity (
+ 2 |     Id int, StringId text, Note text, TimeType text, DayOfWeek text, Year text, Month text, Day text, Hour text, Minute text, Second text, Duration int
+ 3 | );
+ 4 | 
+ 5 | CREATE TABLE Activity1 (
+ 6 |     Id int, StringId text, Note text, TimeType text, DayOfWeek text, Year text, Month text, Day text, Hour text, Minute text, Second text, Duration int
+ 7 | );
+ 8 | 
+ 9 | CREATE TABLE Activity2 (
+10 |     Id int, StringId text, Note text, TimeType text, DayOfWeek text, Year text, Month text, Day text, Hour text, Minute text, Second text, Duration int
+11 | );
+
+
+--------------------------------------------------------------------------------
+/tools/tool.go:
+--------------------------------------------------------------------------------
+ 1 | package tools
+ 2 | 
+ 3 | import "context"
+ 4 | 
+ 5 | // Tool is a tool for the llm agent to interact with different applications.
+ 6 | type Tool interface {
+ 7 | 	Name() string
+ 8 | 	Description() string
+ 9 | 	Call(ctx context.Context, input string) (string, error)
+10 | }
+11 | 
+
+
+--------------------------------------------------------------------------------
+/tools/wikipedia/client.go:
+--------------------------------------------------------------------------------
+  1 | package wikipedia
+  2 | 
+  3 | import (
+  4 | 	"bytes"
+  5 | 	"context"
+  6 | 	"encoding/json"
+  7 | 	"fmt"
+  8 | 	"io"
+  9 | 	"net/http"
+ 10 | 	"net/url"
+ 11 | 	"strconv"
+ 12 | 	"time"
+ 13 | )
+ 14 | 
+ 15 | const _baseURL = "https://%s.wikipedia.org/w/api.php"
+ 16 | 
+ 17 | type searchResponse struct {
+ 18 | 	Query struct {
+ 19 | 		Search []struct {
+ 20 | 			Ns        int       `json:"ns"`
+ 21 | 			Title     string    `json:"title"`
+ 22 | 			PageID    int       `json:"pageid"`
+ 23 | 			Size      int       `json:"size"`
+ 24 | 			WordCount int       `json:"wordcount"`
+ 25 | 			Snippet   string    `json:"snippet"`
+ 26 | 			Timestamp time.Time `json:"timestamp"`
+ 27 | 		} `json:"search"`
+ 28 | 	} `json:"query"`
+ 29 | }
+ 30 | 
+ 31 | func search(
+ 32 | 	ctx context.Context,
+ 33 | 	limit int,
+ 34 | 	query,
+ 35 | 	languageCode,
+ 36 | 	userAgent string,
+ 37 | ) (searchResponse, error) {
+ 38 | 	params := make(url.Values)
+ 39 | 	params.Add("format", "json")
+ 40 | 	params.Add("action", "query")
+ 41 | 	params.Add("list", "search")
+ 42 | 	params.Add("srsearch", query)
+ 43 | 	params.Add("srlimit", strconv.Itoa(limit))
+ 44 | 
+ 45 | 	reqURL := fmt.Sprintf("%s?%s", fmt.Sprintf(_baseURL, languageCode), params.Encode())
+ 46 | 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+ 47 | 	if err != nil {
+ 48 | 		return searchResponse{}, fmt.Errorf("creating request in wikipedia: %w ", err)
+ 49 | 	}
+ 50 | 	req.Header.Add("User-Agent", userAgent)
+ 51 | 
+ 52 | 	res, err := http.DefaultClient.Do(req)
+ 53 | 	if err != nil {
+ 54 | 		return searchResponse{}, fmt.Errorf("doing response in wikipedia: %w", err)
+ 55 | 	}
+ 56 | 	defer res.Body.Close()
+ 57 | 
+ 58 | 	buf := new(bytes.Buffer)
+ 59 | 	_, err = io.Copy(buf, res.Body)
+ 60 | 	if err != nil {
+ 61 | 		return searchResponse{}, fmt.Errorf("coping data in wikipedia: %w", err)
+ 62 | 	}
+ 63 | 
+ 64 | 	var result searchResponse
+ 65 | 	err = json.Unmarshal(buf.Bytes(), &result)
+ 66 | 	if err != nil {
+ 67 | 		return searchResponse{}, fmt.Errorf("unmarshal data in wikipedia: %w", err)
+ 68 | 	}
+ 69 | 
+ 70 | 	return result, nil
+ 71 | }
+ 72 | 
+ 73 | type pageResult struct {
+ 74 | 	Query struct {
+ 75 | 		Pages map[string]struct {
+ 76 | 			Title   string `json:"title"`
+ 77 | 			Extract string `json:"extract"`
+ 78 | 		} `json:"pages"`
+ 79 | 	} `json:"query"`
+ 80 | }
+ 81 | 
+ 82 | func getPage(ctx context.Context, pageID int, languageCode, userAgent string) (pageResult, error) {
+ 83 | 	params := make(url.Values)
+ 84 | 	params.Add("format", "json")
+ 85 | 	params.Add("action", "query")
+ 86 | 	params.Add("prop", "extracts")
+ 87 | 	params.Add("pageids", strconv.Itoa(pageID))
+ 88 | 
+ 89 | 	reqURL := fmt.Sprintf("%s?%s", fmt.Sprintf(_baseURL, languageCode), params.Encode())
+ 90 | 
+ 91 | 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+ 92 | 	if err != nil {
+ 93 | 		return pageResult{}, fmt.Errorf("creating request in wikipedia: %w ", err)
+ 94 | 	}
+ 95 | 	req.Header.Add("User-Agent", userAgent)
+ 96 | 
+ 97 | 	res, err := http.DefaultClient.Do(req)
+ 98 | 	if err != nil {
+ 99 | 		return pageResult{}, fmt.Errorf("doing response in wikipedia: %w", err)
+100 | 	}
+101 | 	defer res.Body.Close()
+102 | 
+103 | 	buf := new(bytes.Buffer)
+104 | 	_, err = io.Copy(buf, res.Body)
+105 | 	if err != nil {
+106 | 		return pageResult{}, fmt.Errorf("coping data in wikipedia: %w", err)
+107 | 	}
+108 | 
+109 | 	var result pageResult
+110 | 	err = json.Unmarshal(buf.Bytes(), &result)
+111 | 	if err != nil {
+112 | 		return pageResult{}, fmt.Errorf("unmarshal data in wikipedia: %w", err)
+113 | 	}
+114 | 
+115 | 	return result, nil
+116 | }
+117 | 
+
+
+--------------------------------------------------------------------------------
+/tools/wikipedia/doc.go:
+--------------------------------------------------------------------------------
+1 | // Package wikipedia contains an implementation of the tool interface with the
+2 | // wikipedia api.
+3 | package wikipedia
+4 | 
+
+
+--------------------------------------------------------------------------------
+/tools/wikipedia/wikipedia.go:
+--------------------------------------------------------------------------------
+  1 | package wikipedia
+  2 | 
+  3 | import (
+  4 | 	"context"
+  5 | 	"errors"
+  6 | 	"strconv"
+  7 | 
+  8 | 	"github.com/tmc/langchaingo/callbacks"
+  9 | 	"github.com/tmc/langchaingo/tools"
+ 10 | )
+ 11 | 
+ 12 | const (
+ 13 | 	_defaultTopK         = 2
+ 14 | 	_defaultDocMaxChars  = 2000
+ 15 | 	_defaultLanguageCode = "en"
+ 16 | )
+ 17 | 
+ 18 | // ErrUnexpectedAPIResult is returned if the result form the wikipedia api is unexpected.
+ 19 | var ErrUnexpectedAPIResult = errors.New("unexpected result from wikipedia api")
+ 20 | 
+ 21 | // Tool is an implementation of the tool interface that finds information using the wikipedia api.
+ 22 | type Tool struct {
+ 23 | 	CallbacksHandler callbacks.Handler
+ 24 | 	// The number of wikipedia pages to include in the result.
+ 25 | 	TopK int
+ 26 | 	// The number of characters to take from each page.
+ 27 | 	DocMaxChars int
+ 28 | 	// The language code to use.
+ 29 | 	LanguageCode string
+ 30 | 	// The user agent sent in the heder. See https://www.mediawiki.org/wiki/API:Etiquette.
+ 31 | 	UserAgent string
+ 32 | }
+ 33 | 
+ 34 | var _ tools.Tool = Tool{}
+ 35 | 
+ 36 | // New creates a new wikipedia tool to find wikipedia pages using the wikipedia api. TopK is set
+ 37 | // to 2, DocMaxChars is set to 2000 and the language code is set to "en".
+ 38 | func New(userAgent string) Tool {
+ 39 | 	return Tool{
+ 40 | 		TopK:         _defaultTopK,
+ 41 | 		DocMaxChars:  _defaultDocMaxChars,
+ 42 | 		LanguageCode: _defaultLanguageCode,
+ 43 | 		UserAgent:    userAgent,
+ 44 | 	}
+ 45 | }
+ 46 | 
+ 47 | func (t Tool) Name() string {
+ 48 | 	return "Wikipedia"
+ 49 | }
+ 50 | 
+ 51 | func (t Tool) Description() string {
+ 52 | 	return `
+ 53 | 	A wrapper around Wikipedia. 
+ 54 | 	Useful for when you need to answer general questions about 
+ 55 | 	people, places, companies, facts, historical events, or other subjects. 
+ 56 | 	Input should be a search query.`
+ 57 | }
+ 58 | 
+ 59 | // Call uses the wikipedia api to find the top search results for the input and returns
+ 60 | // the first part of the documents combined.
+ 61 | func (t Tool) Call(ctx context.Context, input string) (string, error) {
+ 62 | 	if t.CallbacksHandler != nil {
+ 63 | 		t.CallbacksHandler.HandleToolStart(ctx, input)
+ 64 | 	}
+ 65 | 
+ 66 | 	result, err := t.searchWiKi(ctx, input)
+ 67 | 	if err != nil {
+ 68 | 		if t.CallbacksHandler != nil {
+ 69 | 			t.CallbacksHandler.HandleToolError(ctx, err)
+ 70 | 		}
+ 71 | 		return "", err
+ 72 | 	}
+ 73 | 
+ 74 | 	if t.CallbacksHandler != nil {
+ 75 | 		t.CallbacksHandler.HandleToolEnd(ctx, result)
+ 76 | 	}
+ 77 | 
+ 78 | 	return result, nil
+ 79 | }
+ 80 | 
+ 81 | func (t Tool) searchWiKi(ctx context.Context, input string) (string, error) {
+ 82 | 	searchResult, err := search(ctx, t.TopK, input, t.LanguageCode, t.UserAgent)
+ 83 | 	if err != nil {
+ 84 | 		return "", err
+ 85 | 	}
+ 86 | 
+ 87 | 	if len(searchResult.Query.Search) == 0 {
+ 88 | 		return "no wikipedia pages found", nil
+ 89 | 	}
+ 90 | 
+ 91 | 	result := ""
+ 92 | 
+ 93 | 	for _, search := range searchResult.Query.Search {
+ 94 | 		getPageResult, err := getPage(ctx, search.PageID, t.LanguageCode, t.UserAgent)
+ 95 | 		if err != nil {
+ 96 | 			return "", err
+ 97 | 		}
+ 98 | 
+ 99 | 		page, ok := getPageResult.Query.Pages[strconv.Itoa(search.PageID)]
+100 | 		if !ok {
+101 | 			return "", ErrUnexpectedAPIResult
+102 | 		}
+103 | 		if len(page.Extract) >= t.DocMaxChars {
+104 | 			result += page.Extract[0:t.DocMaxChars]
+105 | 			continue
+106 | 		}
+107 | 		result += page.Extract
+108 | 	}
+109 | 
+110 | 	return result, nil
+111 | }
+112 | 
+
+
+--------------------------------------------------------------------------------
+/tools/wikipedia/wikipedia_test.go:
+--------------------------------------------------------------------------------
+ 1 | package wikipedia
+ 2 | 
+ 3 | import (
+ 4 | 	"context"
+ 5 | 	"testing"
+ 6 | 
+ 7 | 	"github.com/stretchr/testify/require"
+ 8 | )
+ 9 | 
+10 | const _userAgent = "langchaingo test (https://github.com/tmc/langchaingo)"
+11 | 
+12 | func TestWikipedia(t *testing.T) {
+13 | 	t.Parallel()
+14 | 
+15 | 	tool := New(_userAgent)
+16 | 	_, err := tool.Call(context.Background(), "america")
+17 | 	require.NoError(t, err)
+18 | }
+19 | 
+
+
+--------------------------------------------------------------------------------
+/tools/zapier/description.go:
+--------------------------------------------------------------------------------
+ 1 | package zapier
+ 2 | 
+ 3 | const (
+ 4 | 	_baseZapierDescription = "A wrapper around Zapier NLA actions. The input to this tool is a natural " +
+ 5 | 		"language instruction, for example \"get the latest email from my bank\" or \"send a slack message to " +
+ 6 | 		"the #general channel\". Each tool will have params associated with it that are specified as a list. " +
+ 7 | 		"You MUST take into account the params when creating the instruction. For example, if the params are " +
+ 8 | 		"['Message_Text', 'Channel'], your instruction should be something like 'send a slack message to the " +
+ 9 | 		"#general channel with the text hello world'. Another example: if the params are ['Calendar', 'Search_Term']" +
+10 | 		", your instruction should be something like 'find the meeting in my personal calendar at 3pm'. Do not make" +
+11 | 		"up params, they will be explicitly specified in the tool description. If you do not have enough information " +
+12 | 		"to fill in the params, just say 'not enough information provided in the instruction, missing <param>'. If you " +
+13 | 		"get a none or null response, STOP EXECUTION, do not try to another tool! This tool specifically used for: " +
+14 | 		"{{.ZapierDescription}}, and has params: " +
+15 | 		"[{{$params := .Params}}{{ range $index, $element := .Params}}{{if $index}}, {{end}}'{{$element}}'{{end}}]"
+16 | )
+17 | 
+
+
+--------------------------------------------------------------------------------
+/tools/zapier/doc.go:
+--------------------------------------------------------------------------------
+1 | // Package zapier contains an implementation of the tool interface with the
+2 | // zapier NLA api client.
+3 | package zapier
+4 | 
+
+
+--------------------------------------------------------------------------------
+/tools/zapier/internal/client.go:
+--------------------------------------------------------------------------------
+  1 | package internal
+  2 | 
+  3 | import (
+  4 | 	"bytes"
+  5 | 	"context"
+  6 | 	"encoding/json"
+  7 | 	"fmt"
+  8 | 	"io"
+  9 | 	"net/http"
+ 10 | 	"os"
+ 11 | )
+ 12 | 
+ 13 | type listResponse struct {
+ 14 | 	Results           []ListResult `json:"results"`
+ 15 | 	ConfigurationLink string       `json:"configuration_link"`
+ 16 | }
+ 17 | 
+ 18 | type ListResult struct {
+ 19 | 	ID          string            `json:"id"`
+ 20 | 	OperationID string            `json:"operation_id"`
+ 21 | 	Description string            `json:"description"`
+ 22 | 	Params      map[string]string `json:"params"`
+ 23 | }
+ 24 | 
+ 25 | type executionResponse struct {
+ 26 | 	ActionUsed string      `json:"action_used"`
+ 27 | 	Result     interface{} `json:"result"`
+ 28 | 	Status     string      `json:"status"`
+ 29 | 	Error      string      `json:"error"`
+ 30 | }
+ 31 | 
+ 32 | const (
+ 33 | 	zapierNLABaseURL = "https://nla.zapier.com/api/v1"
+ 34 | )
+ 35 | 
+ 36 | // Client for interacting with Zapier NLA API.
+ 37 | type Client struct {
+ 38 | 	client *http.Client
+ 39 | }
+ 40 | 
+ 41 | // Transport RoundTripper for Zapier NLA API which adds on Correct Headers.
+ 42 | type Transport struct {
+ 43 | 	RoundTripper http.RoundTripper
+ 44 | 	apiKey       string
+ 45 | 	accessToken  string
+ 46 | 	UserAgent    string
+ 47 | }
+ 48 | 
+ 49 | // ClientOptions for configuring a new Client.
+ 50 | type ClientOptions struct {
+ 51 | 	// User OAuth Access Token for Zapier NLA Takes Precedents over APIKey.
+ 52 | 	AccessToken string
+ 53 | 	// API Key for Zapier NLA.
+ 54 | 	APIKey string
+ 55 | 	// Customer User-Agent if one isn't passed Defaults to "LangChainGo/X.X.X".
+ 56 | 	UserAgent string
+ 57 | 	// Base URL for Zapier NLA API.
+ 58 | 	ZapierNLABaseURL string
+ 59 | }
+ 60 | 
+ 61 | func (cOpts *ClientOptions) Validate() error {
+ 62 | 	if cOpts.APIKey == "" {
+ 63 | 		cOpts.APIKey = os.Getenv("ZAPIER_NLA_API_KEY")
+ 64 | 	}
+ 65 | 
+ 66 | 	if cOpts.APIKey == "" && cOpts.AccessToken == "" {
+ 67 | 		return NoCredentialsError{}
+ 68 | 	}
+ 69 | 
+ 70 | 	if cOpts.UserAgent == "" {
+ 71 | 		cOpts.UserAgent = "LangChainGo/0.0.1"
+ 72 | 	}
+ 73 | 
+ 74 | 	if cOpts.ZapierNLABaseURL == "" {
+ 75 | 		cOpts.ZapierNLABaseURL = zapierNLABaseURL
+ 76 | 	}
+ 77 | 
+ 78 | 	return nil
+ 79 | }
+ 80 | 
+ 81 | /*
+ 82 | Client for Zapier NLA.
+ 83 | 
+ 84 | Full docs here: https://nla.zapier.com/start/
+ 85 | 
+ 86 | This Client supports both API Key and OAuth Credential auth methods. API Key
+ 87 | is the fastest way to get started using this wrapper.
+ 88 | 
+ 89 | Call this Client with either `APIKey` or
+ 90 | `AccessToken` arguments, or set the `ZAPIER_NLA_API_KEY`
+ 91 | environment variable. If both arguments are set, the Access Token will take
+ 92 | precedence.
+ 93 | 
+ 94 | For use-cases where LangChain + Zapier NLA is powering a user-facing application,
+ 95 | and LangChain needs access to the end-user's connected accounts on Zapier.com,
+ 96 | you'll need to use OAuth. Review the full docs above to learn how to create
+ 97 | your own provider and generate credentials.
+ 98 | */
+ 99 | func NewClient(opts ClientOptions) (*Client, error) {
+100 | 	err := opts.Validate()
+101 | 	if err != nil {
+102 | 		return nil, err
+103 | 	}
+104 | 
+105 | 	return &Client{
+106 | 		client: &http.Client{
+107 | 			Transport: &Transport{
+108 | 				RoundTripper: http.DefaultTransport,
+109 | 				apiKey:       opts.APIKey,
+110 | 				accessToken:  opts.AccessToken,
+111 | 				UserAgent:    opts.UserAgent,
+112 | 			},
+113 | 		},
+114 | 	}, nil
+115 | }
+116 | 
+117 | /*
+118 | List returns a list of all exposed (enabled) actions associated with
+119 | current user (associated with the set api_key). Change your exposed
+120 | actions here: https://nla.zapier.com/demo/start/
+121 | 
+122 | The return list can be empty if no actions exposed. Else will contain
+123 | a list of ListResult structs, which look like this:
+124 | 
+125 | 	[
+126 | 		ListResult{
+127 | 			"ID": str,
+128 | 			"OperationID": str,
+129 | 			"Description": str,
+130 | 			"Params": Dict[str, str]
+131 | 		}
+132 | 	]
+133 | 
+134 | `Params` will always contain an `instructions` key, the only required
+135 | param. All others optional and if provided will override any AI guesses
+136 | (see "understanding the AI guessing flow" here:
+137 | https://nla.zapier.com/api/v1/docs).
+138 | */
+139 | func (c *Client) List(ctx context.Context) ([]ListResult, error) {
+140 | 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, formatListURL(), nil)
+141 | 	if err != nil {
+142 | 		return nil, err
+143 | 	}
+144 | 
+145 | 	resp, err := c.client.Do(req)
+146 | 	if err != nil {
+147 | 		return nil, err
+148 | 	}
+149 | 
+150 | 	b, err := io.ReadAll(resp.Body)
+151 | 	if err != nil {
+152 | 		return nil, err
+153 | 	}
+154 | 	defer resp.Body.Close()
+155 | 
+156 | 	lr := listResponse{}
+157 | 
+158 | 	err = json.Unmarshal(b, &lr)
+159 | 	if err != nil {
+160 | 		return nil, err
+161 | 	}
+162 | 
+163 | 	return lr.Results, nil
+164 | }
+165 | 
+166 | /*
+167 | Execute an action that is identified by action_id, must be exposed
+168 | (enabled) by the current user (associated with the set api_key). Change
+169 | your exposed actions here: https://nla.zapier.com/demo/start/
+170 | 
+171 | The return JSON is guaranteed to be less than ~500 words (350
+172 | tokens) making it safe to inject into the prompt of another LLM
+173 | call.
+174 | */
+175 | func (c *Client) Execute(
+176 | 	ctx context.Context,
+177 | 	actionID string,
+178 | 	input string,
+179 | 	params map[string]string,
+180 | ) (interface{}, error) {
+181 | 	body, err := createPayload(input, params)
+182 | 	if err != nil {
+183 | 		return "", err
+184 | 	}
+185 | 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, formatExecuteURL(actionID), body)
+186 | 	if err != nil {
+187 | 		return "", err
+188 | 	}
+189 | 
+190 | 	resp, err := c.client.Do(req)
+191 | 	if err != nil {
+192 | 		return "", err
+193 | 	}
+194 | 
+195 | 	b, err := io.ReadAll(resp.Body)
+196 | 	if err != nil {
+197 | 		return "", err
+198 | 	}
+199 | 	defer resp.Body.Close()
+200 | 
+201 | 	executionResponse := executionResponse{}
+202 | 
+203 | 	err = json.Unmarshal(b, &executionResponse)
+204 | 	if err != nil {
+205 | 		return "", err
+206 | 	}
+207 | 
+208 | 	return executionResponse.Result, nil
+209 | }
+210 | 
+211 | /*
+212 | ExecuteAsString is a convenience wrapper around Execute that returns a string response.
+213 | */
+214 | func (c *Client) ExecuteAsString(
+215 | 	ctx context.Context,
+216 | 	actionID string,
+217 | 	input string,
+218 | 	params map[string]string,
+219 | ) (string, error) {
+220 | 	r, err := c.Execute(ctx, actionID, input, params)
+221 | 	if err != nil {
+222 | 		return "", err
+223 | 	}
+224 | 
+225 | 	return fmt.Sprintf("%v", r), nil
+226 | }
+227 | 
+228 | func formatListURL() string {
+229 | 	return fmt.Sprintf("%s/exposed", zapierNLABaseURL)
+230 | }
+231 | 
+232 | func formatExecuteURL(actionID string) string {
+233 | 	return fmt.Sprintf("%s/exposed/%s/execute/", zapierNLABaseURL, actionID)
+234 | }
+235 | 
+236 | func createPayload(input string, params map[string]string) (*bytes.Buffer, error) {
+237 | 	params["instructions"] = input
+238 | 
+239 | 	b, err := json.Marshal(params)
+240 | 	if err != nil {
+241 | 		return nil, err
+242 | 	}
+243 | 
+244 | 	return bytes.NewBuffer(b), nil
+245 | }
+246 | 
+247 | func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
+248 | 	t.createHeaders(req)
+249 | 	return t.RoundTripper.RoundTrip(req)
+250 | }
+251 | 
+252 | func (t *Transport) createAuthHeader(req *http.Request) {
+253 | 	if t.accessToken != "" {
+254 | 		req.Header.Set("Authorization", "Bearer "+t.accessToken)
+255 | 	} else {
+256 | 		req.Header.Set("X-API-Key", t.apiKey)
+257 | 	}
+258 | }
+259 | 
+260 | func (t *Transport) createHeaders(req *http.Request) {
+261 | 	t.createAuthHeader(req)
+262 | 	req.Header.Set("Content-Type", "application/json")
+263 | 	req.Header.Set("Accept", "application/json")
+264 | 	req.Header.Set("User-Agent", t.UserAgent)
+265 | }
+266 | 
+
+
+--------------------------------------------------------------------------------
+/tools/zapier/internal/errors.go:
+--------------------------------------------------------------------------------
+1 | package internal
+2 | 
+3 | // NoCredentialsError is thrown when no valid credentials are passed to the client.
+4 | type NoCredentialsError struct{}
+5 | 
+6 | func (e NoCredentialsError) Error() string {
+7 | 	return "Must pass a APIKey or AccessToken"
+8 | }
+9 | 
+
+
+--------------------------------------------------------------------------------
+/tools/zapier/toolkit.go:
+--------------------------------------------------------------------------------
+ 1 | package zapier
+ 2 | 
+ 3 | import (
+ 4 | 	"context"
+ 5 | 
+ 6 | 	"github.com/tmc/langchaingo/tools"
+ 7 | 	"github.com/tmc/langchaingo/tools/zapier/internal"
+ 8 | )
+ 9 | 
+10 | type ToolkitOpts struct {
+11 | 	// User OAuth Access Token for Zapier NLA Takes Precedents over APIKey.
+12 | 	AccessToken string
+13 | 	// API Key for Zapier NLA.
+14 | 	APIKey string
+15 | 	// Customer User-Agent if one isn't passed Defaults to "LangChainGo/X.X.X".
+16 | 	UserAgent string
+17 | 	// Base URL for Zapier NLA API.
+18 | 	ZapierNLABaseURL string
+19 | }
+20 | 
+21 | /*
+22 | Toolkit gets all the Zapier NLA Tools configured for the account.
+23 | 
+24 | Full docs here: https://nla.zapier.com/start/
+25 | 
+26 | Note: this wrapper currently only implemented the `api_key` auth method for testing
+27 | and server-side production use cases (using the developer's connected accounts on
+28 | Zapier.com)
+29 | 
+30 | For use-cases where LangChain + Zapier NLA is powering a user-facing application, and
+31 | LangChain needs access to the end-user's connected accounts on Zapier.com, you'll need
+32 | to use oauth. Review the full docs above and reach out to nla@zapier.com for
+33 | developer support.
+34 | */
+35 | func Toolkit(ctx context.Context, opts ToolkitOpts) ([]tools.Tool, error) {
+36 | 	c, err := internal.NewClient(internal.ClientOptions{
+37 | 		APIKey:           opts.APIKey,
+38 | 		AccessToken:      opts.AccessToken,
+39 | 		UserAgent:        opts.UserAgent,
+40 | 		ZapierNLABaseURL: opts.ZapierNLABaseURL,
+41 | 	})
+42 | 	if err != nil {
+43 | 		return nil, err
+44 | 	}
+45 | 
+46 | 	listResponse, err := c.List(ctx)
+47 | 	if err != nil {
+48 | 		return nil, err
+49 | 	}
+50 | 
+51 | 	tools := make([]tools.Tool, len(listResponse))
+52 | 
+53 | 	for i, result := range listResponse {
+54 | 		tool, err := New(ToolOptions{
+55 | 			Name:        result.Description,
+56 | 			ActionID:    result.ID,
+57 | 			Params:      result.Params,
+58 | 			UserAgent:   opts.UserAgent,
+59 | 			APIKey:      opts.APIKey,
+60 | 			AccessToken: opts.AccessToken,
+61 | 			Client:      c,
+62 | 		})
+63 | 		if err != nil {
+64 | 			return nil, err
+65 | 		}
+66 | 
+67 | 		tools[i] = tool
+68 | 	}
+69 | 
+70 | 	return tools, nil
+71 | }
+72 | 
+
+
+--------------------------------------------------------------------------------
+/tools/zapier/zapier.go:
+--------------------------------------------------------------------------------
+  1 | package zapier
+  2 | 
+  3 | import (
+  4 | 	"bytes"
+  5 | 	"context"
+  6 | 	"text/template"
+  7 | 
+  8 | 	"github.com/tmc/langchaingo/callbacks"
+  9 | 	"github.com/tmc/langchaingo/tools"
+ 10 | 	"github.com/tmc/langchaingo/tools/zapier/internal"
+ 11 | )
+ 12 | 
+ 13 | type description struct {
+ 14 | 	Params            []string
+ 15 | 	ZapierDescription string
+ 16 | }
+ 17 | 
+ 18 | type Tool struct {
+ 19 | 	CallbacksHandler callbacks.Handler
+ 20 | 	client           *internal.Client
+ 21 | 	name             string
+ 22 | 	description      string
+ 23 | 	actionID         string
+ 24 | 	params           map[string]string
+ 25 | }
+ 26 | 
+ 27 | var _ tools.Tool = Tool{}
+ 28 | 
+ 29 | type ToolOptions struct {
+ 30 | 	Name        string
+ 31 | 	ActionID    string
+ 32 | 	Params      map[string]string
+ 33 | 	APIKey      string
+ 34 | 	AccessToken string
+ 35 | 	UserAgent   string
+ 36 | 	Client      *internal.Client
+ 37 | }
+ 38 | 
+ 39 | func (tOpts ToolOptions) Validate() error {
+ 40 | 	return nil
+ 41 | }
+ 42 | 
+ 43 | /*
+ 44 | New creates a new Zapier NLA Tool that is Tool Interface compliant.
+ 45 | */
+ 46 | func New(opts ToolOptions) (*Tool, error) {
+ 47 | 	err := opts.Validate()
+ 48 | 	if err != nil {
+ 49 | 		return nil, err
+ 50 | 	}
+ 51 | 
+ 52 | 	if opts.Client != nil {
+ 53 | 		opts.Client, err = internal.NewClient(internal.ClientOptions{
+ 54 | 			APIKey:      opts.APIKey,
+ 55 | 			AccessToken: opts.AccessToken,
+ 56 | 			UserAgent:   opts.UserAgent,
+ 57 | 		})
+ 58 | 		if err != nil {
+ 59 | 			return nil, err
+ 60 | 		}
+ 61 | 	}
+ 62 | 
+ 63 | 	t := &Tool{
+ 64 | 		client:   opts.Client,
+ 65 | 		name:     opts.Name,
+ 66 | 		actionID: opts.ActionID,
+ 67 | 		params:   opts.Params,
+ 68 | 	}
+ 69 | 	t.description = t.createDescription()
+ 70 | 	return t, nil
+ 71 | }
+ 72 | 
+ 73 | func (t Tool) Name() string {
+ 74 | 	return t.name
+ 75 | }
+ 76 | 
+ 77 | func (t Tool) Description() string {
+ 78 | 	return t.description
+ 79 | }
+ 80 | 
+ 81 | func (t Tool) Call(ctx context.Context, input string) (string, error) {
+ 82 | 	if t.CallbacksHandler != nil {
+ 83 | 		t.CallbacksHandler.HandleToolStart(ctx, input)
+ 84 | 	}
+ 85 | 
+ 86 | 	result, err := t.client.ExecuteAsString(ctx, t.actionID, input, t.params)
+ 87 | 	if err != nil {
+ 88 | 		if t.CallbacksHandler != nil {
+ 89 | 			t.CallbacksHandler.HandleToolError(ctx, err)
+ 90 | 		}
+ 91 | 		return "", err
+ 92 | 	}
+ 93 | 
+ 94 | 	if t.CallbacksHandler != nil {
+ 95 | 		t.CallbacksHandler.HandleToolEnd(ctx, result)
+ 96 | 	}
+ 97 | 
+ 98 | 	return result, nil
+ 99 | }
+100 | 
+101 | func (t Tool) createDescription() string {
+102 | 	tmpl, err := template.New("").Parse(_baseZapierDescription)
+103 | 	if err != nil {
+104 | 		panic(err)
+105 | 	}
+106 | 	var bytes bytes.Buffer
+107 | 
+108 | 	paramNames := make([]string, 0, len(t.params))
+109 | 	for k := range t.params {
+110 | 		paramNames = append(paramNames, k)
+111 | 	}
+112 | 
+113 | 	desc := description{
+114 | 		Params:            paramNames,
+115 | 		ZapierDescription: t.name,
+116 | 	}
+117 | 
+118 | 	err = tmpl.Execute(&bytes, desc)
+119 | 	if err != nil {
+120 | 		panic(err)
+121 | 	}
+122 | 
+123 | 	return bytes.String()
+124 | }
+125 | 
+
+
+--------------------------------------------------------------------------------
+/tools/zapier/zapier_test.go:
+--------------------------------------------------------------------------------
+ 1 | package zapier
+ 2 | 
+ 3 | import (
+ 4 | 	"testing"
+ 5 | 
+ 6 | 	"github.com/stretchr/testify/assert"
+ 7 | 	"github.com/stretchr/testify/require"
+ 8 | )
+ 9 | 
+10 | func TestCreateDescription(t *testing.T) {
+11 | 	t.Parallel()
+12 | 
+13 | 	tool, err := New(ToolOptions{
+14 | 		Name:     "Test Tool",
+15 | 		ActionID: "test1234",
+16 | 		Params: map[string]string{
+17 | 			"Param1": "Param1 Description",
+18 | 			"Param2": "Param2 Description",
+19 | 		},
+20 | 	})
+21 | 	require.NoError(t, err)
+22 | 
+23 | 	desc := tool.Description()
+24 | 	assert.Contains(t, desc, "Test Tool")
+25 | 	assert.Contains(t, desc, "Param2")
+26 | 	assert.Contains(t, desc, "Param1")
+27 | }
+28 | 
+
+
+--------------------------------------------------------------------------------
