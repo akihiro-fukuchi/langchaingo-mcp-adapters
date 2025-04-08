@@ -1,0 +1,2477 @@
+└── mcp
+    ├── prompts.go
+    ├── resources.go
+    ├── tools.go
+    ├── tools_test.go
+    ├── types.go
+    └── utils.go
+
+
+/mcp/prompts.go:
+--------------------------------------------------------------------------------
+  1 | package mcp
+  2 | 
+  3 | /* Prompts */
+  4 | 
+  5 | // ListPromptsRequest is sent from the client to request a list of prompts and
+  6 | // prompt templates the server has.
+  7 | type ListPromptsRequest struct {
+  8 | 	PaginatedRequest
+  9 | }
+ 10 | 
+ 11 | // ListPromptsResult is the server's response to a prompts/list request from
+ 12 | // the client.
+ 13 | type ListPromptsResult struct {
+ 14 | 	PaginatedResult
+ 15 | 	Prompts []Prompt `json:"prompts"`
+ 16 | }
+ 17 | 
+ 18 | // GetPromptRequest is used by the client to get a prompt provided by the
+ 19 | // server.
+ 20 | type GetPromptRequest struct {
+ 21 | 	Request
+ 22 | 	Params struct {
+ 23 | 		// The name of the prompt or prompt template.
+ 24 | 		Name string `json:"name"`
+ 25 | 		// Arguments to use for templating the prompt.
+ 26 | 		Arguments map[string]string `json:"arguments,omitempty"`
+ 27 | 	} `json:"params"`
+ 28 | }
+ 29 | 
+ 30 | // GetPromptResult is the server's response to a prompts/get request from the
+ 31 | // client.
+ 32 | type GetPromptResult struct {
+ 33 | 	Result
+ 34 | 	// An optional description for the prompt.
+ 35 | 	Description string          `json:"description,omitempty"`
+ 36 | 	Messages    []PromptMessage `json:"messages"`
+ 37 | }
+ 38 | 
+ 39 | // Prompt represents a prompt or prompt template that the server offers.
+ 40 | // If Arguments is non-nil and non-empty, this indicates the prompt is a template
+ 41 | // that requires argument values to be provided when calling prompts/get.
+ 42 | // If Arguments is nil or empty, this is a static prompt that takes no arguments.
+ 43 | type Prompt struct {
+ 44 | 	// The name of the prompt or prompt template.
+ 45 | 	Name string `json:"name"`
+ 46 | 	// An optional description of what this prompt provides
+ 47 | 	Description string `json:"description,omitempty"`
+ 48 | 	// A list of arguments to use for templating the prompt.
+ 49 | 	// The presence of arguments indicates this is a template prompt.
+ 50 | 	Arguments []PromptArgument `json:"arguments,omitempty"`
+ 51 | }
+ 52 | 
+ 53 | // PromptArgument describes an argument that a prompt template can accept.
+ 54 | // When a prompt includes arguments, clients must provide values for all
+ 55 | // required arguments when making a prompts/get request.
+ 56 | type PromptArgument struct {
+ 57 | 	// The name of the argument.
+ 58 | 	Name string `json:"name"`
+ 59 | 	// A human-readable description of the argument.
+ 60 | 	Description string `json:"description,omitempty"`
+ 61 | 	// Whether this argument must be provided.
+ 62 | 	// If true, clients must include this argument when calling prompts/get.
+ 63 | 	Required bool `json:"required,omitempty"`
+ 64 | }
+ 65 | 
+ 66 | // Role represents the sender or recipient of messages and data in a
+ 67 | // conversation.
+ 68 | type Role string
+ 69 | 
+ 70 | const (
+ 71 | 	RoleUser      Role = "user"
+ 72 | 	RoleAssistant Role = "assistant"
+ 73 | )
+ 74 | 
+ 75 | // PromptMessage describes a message returned as part of a prompt.
+ 76 | //
+ 77 | // This is similar to `SamplingMessage`, but also supports the embedding of
+ 78 | // resources from the MCP server.
+ 79 | type PromptMessage struct {
+ 80 | 	Role    Role    `json:"role"`
+ 81 | 	Content Content `json:"content"` // Can be TextContent, ImageContent, or EmbeddedResource
+ 82 | }
+ 83 | 
+ 84 | // PromptListChangedNotification is an optional notification from the server
+ 85 | // to the client, informing it that the list of prompts it offers has changed. This
+ 86 | // may be issued by servers without any previous subscription from the client.
+ 87 | type PromptListChangedNotification struct {
+ 88 | 	Notification
+ 89 | }
+ 90 | 
+ 91 | // PromptOption is a function that configures a Prompt.
+ 92 | // It provides a flexible way to set various properties of a Prompt using the functional options pattern.
+ 93 | type PromptOption func(*Prompt)
+ 94 | 
+ 95 | // ArgumentOption is a function that configures a PromptArgument.
+ 96 | // It allows for flexible configuration of prompt arguments using the functional options pattern.
+ 97 | type ArgumentOption func(*PromptArgument)
+ 98 | 
+ 99 | //
+100 | // Core Prompt Functions
+101 | //
+102 | 
+103 | // NewPrompt creates a new Prompt with the given name and options.
+104 | // The prompt will be configured based on the provided options.
+105 | // Options are applied in order, allowing for flexible prompt configuration.
+106 | func NewPrompt(name string, opts ...PromptOption) Prompt {
+107 | 	prompt := Prompt{
+108 | 		Name: name,
+109 | 	}
+110 | 
+111 | 	for _, opt := range opts {
+112 | 		opt(&prompt)
+113 | 	}
+114 | 
+115 | 	return prompt
+116 | }
+117 | 
+118 | // WithPromptDescription adds a description to the Prompt.
+119 | // The description should provide a clear, human-readable explanation of what the prompt does.
+120 | func WithPromptDescription(description string) PromptOption {
+121 | 	return func(p *Prompt) {
+122 | 		p.Description = description
+123 | 	}
+124 | }
+125 | 
+126 | // WithArgument adds an argument to the prompt's argument list.
+127 | // The argument will be configured based on the provided options.
+128 | func WithArgument(name string, opts ...ArgumentOption) PromptOption {
+129 | 	return func(p *Prompt) {
+130 | 		arg := PromptArgument{
+131 | 			Name: name,
+132 | 		}
+133 | 
+134 | 		for _, opt := range opts {
+135 | 			opt(&arg)
+136 | 		}
+137 | 
+138 | 		if p.Arguments == nil {
+139 | 			p.Arguments = make([]PromptArgument, 0)
+140 | 		}
+141 | 		p.Arguments = append(p.Arguments, arg)
+142 | 	}
+143 | }
+144 | 
+145 | //
+146 | // Argument Options
+147 | //
+148 | 
+149 | // ArgumentDescription adds a description to a prompt argument.
+150 | // The description should explain the purpose and expected values of the argument.
+151 | func ArgumentDescription(desc string) ArgumentOption {
+152 | 	return func(arg *PromptArgument) {
+153 | 		arg.Description = desc
+154 | 	}
+155 | }
+156 | 
+157 | // RequiredArgument marks an argument as required in the prompt.
+158 | // Required arguments must be provided when getting the prompt.
+159 | func RequiredArgument() ArgumentOption {
+160 | 	return func(arg *PromptArgument) {
+161 | 		arg.Required = true
+162 | 	}
+163 | }
+164 | 
+
+
+--------------------------------------------------------------------------------
+/mcp/resources.go:
+--------------------------------------------------------------------------------
+  1 | package mcp
+  2 | 
+  3 | import "github.com/yosida95/uritemplate/v3"
+  4 | 
+  5 | // ResourceOption is a function that configures a Resource.
+  6 | // It provides a flexible way to set various properties of a Resource using the functional options pattern.
+  7 | type ResourceOption func(*Resource)
+  8 | 
+  9 | // NewResource creates a new Resource with the given URI, name and options.
+ 10 | // The resource will be configured based on the provided options.
+ 11 | // Options are applied in order, allowing for flexible resource configuration.
+ 12 | func NewResource(uri string, name string, opts ...ResourceOption) Resource {
+ 13 | 	resource := Resource{
+ 14 | 		URI:  uri,
+ 15 | 		Name: name,
+ 16 | 	}
+ 17 | 
+ 18 | 	for _, opt := range opts {
+ 19 | 		opt(&resource)
+ 20 | 	}
+ 21 | 
+ 22 | 	return resource
+ 23 | }
+ 24 | 
+ 25 | // WithResourceDescription adds a description to the Resource.
+ 26 | // The description should provide a clear, human-readable explanation of what the resource represents.
+ 27 | func WithResourceDescription(description string) ResourceOption {
+ 28 | 	return func(r *Resource) {
+ 29 | 		r.Description = description
+ 30 | 	}
+ 31 | }
+ 32 | 
+ 33 | // WithMIMEType sets the MIME type for the Resource.
+ 34 | // This should indicate the format of the resource's contents.
+ 35 | func WithMIMEType(mimeType string) ResourceOption {
+ 36 | 	return func(r *Resource) {
+ 37 | 		r.MIMEType = mimeType
+ 38 | 	}
+ 39 | }
+ 40 | 
+ 41 | // WithAnnotations adds annotations to the Resource.
+ 42 | // Annotations can provide additional metadata about the resource's intended use.
+ 43 | func WithAnnotations(audience []Role, priority float64) ResourceOption {
+ 44 | 	return func(r *Resource) {
+ 45 | 		if r.Annotations == nil {
+ 46 | 			r.Annotations = &struct {
+ 47 | 				Audience []Role  `json:"audience,omitempty"`
+ 48 | 				Priority float64 `json:"priority,omitempty"`
+ 49 | 			}{}
+ 50 | 		}
+ 51 | 		r.Annotations.Audience = audience
+ 52 | 		r.Annotations.Priority = priority
+ 53 | 	}
+ 54 | }
+ 55 | 
+ 56 | // ResourceTemplateOption is a function that configures a ResourceTemplate.
+ 57 | // It provides a flexible way to set various properties of a ResourceTemplate using the functional options pattern.
+ 58 | type ResourceTemplateOption func(*ResourceTemplate)
+ 59 | 
+ 60 | // NewResourceTemplate creates a new ResourceTemplate with the given URI template, name and options.
+ 61 | // The template will be configured based on the provided options.
+ 62 | // Options are applied in order, allowing for flexible template configuration.
+ 63 | func NewResourceTemplate(uriTemplate string, name string, opts ...ResourceTemplateOption) ResourceTemplate {
+ 64 | 	template := ResourceTemplate{
+ 65 | 		URITemplate: &URITemplate{Template: uritemplate.MustNew(uriTemplate)},
+ 66 | 		Name:        name,
+ 67 | 	}
+ 68 | 
+ 69 | 	for _, opt := range opts {
+ 70 | 		opt(&template)
+ 71 | 	}
+ 72 | 
+ 73 | 	return template
+ 74 | }
+ 75 | 
+ 76 | // WithTemplateDescription adds a description to the ResourceTemplate.
+ 77 | // The description should provide a clear, human-readable explanation of what resources this template represents.
+ 78 | func WithTemplateDescription(description string) ResourceTemplateOption {
+ 79 | 	return func(t *ResourceTemplate) {
+ 80 | 		t.Description = description
+ 81 | 	}
+ 82 | }
+ 83 | 
+ 84 | // WithTemplateMIMEType sets the MIME type for the ResourceTemplate.
+ 85 | // This should only be set if all resources matching this template will have the same type.
+ 86 | func WithTemplateMIMEType(mimeType string) ResourceTemplateOption {
+ 87 | 	return func(t *ResourceTemplate) {
+ 88 | 		t.MIMEType = mimeType
+ 89 | 	}
+ 90 | }
+ 91 | 
+ 92 | // WithTemplateAnnotations adds annotations to the ResourceTemplate.
+ 93 | // Annotations can provide additional metadata about the template's intended use.
+ 94 | func WithTemplateAnnotations(audience []Role, priority float64) ResourceTemplateOption {
+ 95 | 	return func(t *ResourceTemplate) {
+ 96 | 		if t.Annotations == nil {
+ 97 | 			t.Annotations = &struct {
+ 98 | 				Audience []Role  `json:"audience,omitempty"`
+ 99 | 				Priority float64 `json:"priority,omitempty"`
+100 | 			}{}
+101 | 		}
+102 | 		t.Annotations.Audience = audience
+103 | 		t.Annotations.Priority = priority
+104 | 	}
+105 | }
+106 | 
+
+
+--------------------------------------------------------------------------------
+/mcp/tools.go:
+--------------------------------------------------------------------------------
+  1 | package mcp
+  2 | 
+  3 | import (
+  4 | 	"encoding/json"
+  5 | 	"errors"
+  6 | 	"fmt"
+  7 | )
+  8 | 
+  9 | var errToolSchemaConflict = errors.New("provide either InputSchema or RawInputSchema, not both")
+ 10 | 
+ 11 | // ListToolsRequest is sent from the client to request a list of tools the
+ 12 | // server has.
+ 13 | type ListToolsRequest struct {
+ 14 | 	PaginatedRequest
+ 15 | }
+ 16 | 
+ 17 | // ListToolsResult is the server's response to a tools/list request from the
+ 18 | // client.
+ 19 | type ListToolsResult struct {
+ 20 | 	PaginatedResult
+ 21 | 	Tools []Tool `json:"tools"`
+ 22 | }
+ 23 | 
+ 24 | // CallToolResult is the server's response to a tool call.
+ 25 | //
+ 26 | // Any errors that originate from the tool SHOULD be reported inside the result
+ 27 | // object, with `isError` set to true, _not_ as an MCP protocol-level error
+ 28 | // response. Otherwise, the LLM would not be able to see that an error occurred
+ 29 | // and self-correct.
+ 30 | //
+ 31 | // However, any errors in _finding_ the tool, an error indicating that the
+ 32 | // server does not support tool calls, or any other exceptional conditions,
+ 33 | // should be reported as an MCP error response.
+ 34 | type CallToolResult struct {
+ 35 | 	Result
+ 36 | 	Content []Content `json:"content"` // Can be TextContent, ImageContent, or      EmbeddedResource
+ 37 | 	// Whether the tool call ended in an error.
+ 38 | 	//
+ 39 | 	// If not set, this is assumed to be false (the call was successful).
+ 40 | 	IsError bool `json:"isError,omitempty"`
+ 41 | }
+ 42 | 
+ 43 | // CallToolRequest is used by the client to invoke a tool provided by the server.
+ 44 | type CallToolRequest struct {
+ 45 | 	Request
+ 46 | 	Params struct {
+ 47 | 		Name      string                 `json:"name"`
+ 48 | 		Arguments map[string]interface{} `json:"arguments,omitempty"`
+ 49 | 		Meta      *struct {
+ 50 | 			// If specified, the caller is requesting out-of-band progress
+ 51 | 			// notifications for this request (as represented by
+ 52 | 			// notifications/progress). The value of this parameter is an
+ 53 | 			// opaque token that will be attached to any subsequent
+ 54 | 			// notifications. The receiver is not obligated to provide these
+ 55 | 			// notifications.
+ 56 | 			ProgressToken ProgressToken `json:"progressToken,omitempty"`
+ 57 | 		} `json:"_meta,omitempty"`
+ 58 | 	} `json:"params"`
+ 59 | }
+ 60 | 
+ 61 | // ToolListChangedNotification is an optional notification from the server to
+ 62 | // the client, informing it that the list of tools it offers has changed. This may
+ 63 | // be issued by servers without any previous subscription from the client.
+ 64 | type ToolListChangedNotification struct {
+ 65 | 	Notification
+ 66 | }
+ 67 | 
+ 68 | // Tool represents the definition for a tool the client can call.
+ 69 | type Tool struct {
+ 70 | 	// The name of the tool.
+ 71 | 	Name string `json:"name"`
+ 72 | 	// A human-readable description of the tool.
+ 73 | 	Description string `json:"description,omitempty"`
+ 74 | 	// A JSON Schema object defining the expected parameters for the tool.
+ 75 | 	InputSchema ToolInputSchema `json:"inputSchema"`
+ 76 | 	// Alternative to InputSchema - allows arbitrary JSON Schema to be provided
+ 77 | 	RawInputSchema json.RawMessage `json:"-"` // Hide this from JSON marshaling
+ 78 | }
+ 79 | 
+ 80 | // MarshalJSON implements the json.Marshaler interface for Tool.
+ 81 | // It handles marshaling either InputSchema or RawInputSchema based on which is set.
+ 82 | func (t Tool) MarshalJSON() ([]byte, error) {
+ 83 | 	// Create a map to build the JSON structure
+ 84 | 	m := make(map[string]interface{}, 3)
+ 85 | 
+ 86 | 	// Add the name and description
+ 87 | 	m["name"] = t.Name
+ 88 | 	if t.Description != "" {
+ 89 | 		m["description"] = t.Description
+ 90 | 	}
+ 91 | 
+ 92 | 	// Determine which schema to use
+ 93 | 	if t.RawInputSchema != nil {
+ 94 | 		if t.InputSchema.Type != "" {
+ 95 | 			return nil, fmt.Errorf("tool %s has both InputSchema and RawInputSchema set: %w", t.Name, errToolSchemaConflict)
+ 96 | 		}
+ 97 | 		m["inputSchema"] = t.RawInputSchema
+ 98 | 	} else {
+ 99 | 		// Use the structured InputSchema
+100 | 		m["inputSchema"] = t.InputSchema
+101 | 	}
+102 | 
+103 | 	return json.Marshal(m)
+104 | }
+105 | 
+106 | type ToolInputSchema struct {
+107 | 	Type       string                 `json:"type"`
+108 | 	Properties map[string]interface{} `json:"properties"`
+109 | 	Required   []string               `json:"required,omitempty"`
+110 | }
+111 | 
+112 | // ToolOption is a function that configures a Tool.
+113 | // It provides a flexible way to set various properties of a Tool using the functional options pattern.
+114 | type ToolOption func(*Tool)
+115 | 
+116 | // PropertyOption is a function that configures a property in a Tool's input schema.
+117 | // It allows for flexible configuration of JSON Schema properties using the functional options pattern.
+118 | type PropertyOption func(map[string]interface{})
+119 | 
+120 | //
+121 | // Core Tool Functions
+122 | //
+123 | 
+124 | // NewTool creates a new Tool with the given name and options.
+125 | // The tool will have an object-type input schema with configurable properties.
+126 | // Options are applied in order, allowing for flexible tool configuration.
+127 | func NewTool(name string, opts ...ToolOption) Tool {
+128 | 	tool := Tool{
+129 | 		Name: name,
+130 | 		InputSchema: ToolInputSchema{
+131 | 			Type:       "object",
+132 | 			Properties: make(map[string]interface{}),
+133 | 			Required:   nil, // Will be omitted from JSON if empty
+134 | 		},
+135 | 	}
+136 | 
+137 | 	for _, opt := range opts {
+138 | 		opt(&tool)
+139 | 	}
+140 | 
+141 | 	return tool
+142 | }
+143 | 
+144 | // NewToolWithRawSchema creates a new Tool with the given name and a raw JSON
+145 | // Schema. This allows for arbitrary JSON Schema to be used for the tool's input
+146 | // schema.
+147 | //
+148 | // NOTE a [Tool] built in such a way is incompatible with the [ToolOption] and
+149 | // runtime errors will result from supplying a [ToolOption] to a [Tool] built
+150 | // with this function.
+151 | func NewToolWithRawSchema(name, description string, schema json.RawMessage) Tool {
+152 | 	tool := Tool{
+153 | 		Name:           name,
+154 | 		Description:    description,
+155 | 		RawInputSchema: schema,
+156 | 	}
+157 | 
+158 | 	return tool
+159 | }
+160 | 
+161 | // WithDescription adds a description to the Tool.
+162 | // The description should provide a clear, human-readable explanation of what the tool does.
+163 | func WithDescription(description string) ToolOption {
+164 | 	return func(t *Tool) {
+165 | 		t.Description = description
+166 | 	}
+167 | }
+168 | 
+169 | //
+170 | // Common Property Options
+171 | //
+172 | 
+173 | // Description adds a description to a property in the JSON Schema.
+174 | // The description should explain the purpose and expected values of the property.
+175 | func Description(desc string) PropertyOption {
+176 | 	return func(schema map[string]interface{}) {
+177 | 		schema["description"] = desc
+178 | 	}
+179 | }
+180 | 
+181 | // Required marks a property as required in the tool's input schema.
+182 | // Required properties must be provided when using the tool.
+183 | func Required() PropertyOption {
+184 | 	return func(schema map[string]interface{}) {
+185 | 		schema["required"] = true
+186 | 	}
+187 | }
+188 | 
+189 | // Title adds a display-friendly title to a property in the JSON Schema.
+190 | // This title can be used by UI components to show a more readable property name.
+191 | func Title(title string) PropertyOption {
+192 | 	return func(schema map[string]interface{}) {
+193 | 		schema["title"] = title
+194 | 	}
+195 | }
+196 | 
+197 | //
+198 | // String Property Options
+199 | //
+200 | 
+201 | // DefaultString sets the default value for a string property.
+202 | // This value will be used if the property is not explicitly provided.
+203 | func DefaultString(value string) PropertyOption {
+204 | 	return func(schema map[string]interface{}) {
+205 | 		schema["default"] = value
+206 | 	}
+207 | }
+208 | 
+209 | // Enum specifies a list of allowed values for a string property.
+210 | // The property value must be one of the specified enum values.
+211 | func Enum(values ...string) PropertyOption {
+212 | 	return func(schema map[string]interface{}) {
+213 | 		schema["enum"] = values
+214 | 	}
+215 | }
+216 | 
+217 | // MaxLength sets the maximum length for a string property.
+218 | // The string value must not exceed this length.
+219 | func MaxLength(max int) PropertyOption {
+220 | 	return func(schema map[string]interface{}) {
+221 | 		schema["maxLength"] = max
+222 | 	}
+223 | }
+224 | 
+225 | // MinLength sets the minimum length for a string property.
+226 | // The string value must be at least this length.
+227 | func MinLength(min int) PropertyOption {
+228 | 	return func(schema map[string]interface{}) {
+229 | 		schema["minLength"] = min
+230 | 	}
+231 | }
+232 | 
+233 | // Pattern sets a regex pattern that a string property must match.
+234 | // The string value must conform to the specified regular expression.
+235 | func Pattern(pattern string) PropertyOption {
+236 | 	return func(schema map[string]interface{}) {
+237 | 		schema["pattern"] = pattern
+238 | 	}
+239 | }
+240 | 
+241 | //
+242 | // Number Property Options
+243 | //
+244 | 
+245 | // DefaultNumber sets the default value for a number property.
+246 | // This value will be used if the property is not explicitly provided.
+247 | func DefaultNumber(value float64) PropertyOption {
+248 | 	return func(schema map[string]interface{}) {
+249 | 		schema["default"] = value
+250 | 	}
+251 | }
+252 | 
+253 | // Max sets the maximum value for a number property.
+254 | // The number value must not exceed this maximum.
+255 | func Max(max float64) PropertyOption {
+256 | 	return func(schema map[string]interface{}) {
+257 | 		schema["maximum"] = max
+258 | 	}
+259 | }
+260 | 
+261 | // Min sets the minimum value for a number property.
+262 | // The number value must not be less than this minimum.
+263 | func Min(min float64) PropertyOption {
+264 | 	return func(schema map[string]interface{}) {
+265 | 		schema["minimum"] = min
+266 | 	}
+267 | }
+268 | 
+269 | // MultipleOf specifies that a number must be a multiple of the given value.
+270 | // The number value must be divisible by this value.
+271 | func MultipleOf(value float64) PropertyOption {
+272 | 	return func(schema map[string]interface{}) {
+273 | 		schema["multipleOf"] = value
+274 | 	}
+275 | }
+276 | 
+277 | //
+278 | // Boolean Property Options
+279 | //
+280 | 
+281 | // DefaultBool sets the default value for a boolean property.
+282 | // This value will be used if the property is not explicitly provided.
+283 | func DefaultBool(value bool) PropertyOption {
+284 | 	return func(schema map[string]interface{}) {
+285 | 		schema["default"] = value
+286 | 	}
+287 | }
+288 | 
+289 | //
+290 | // Property Type Helpers
+291 | //
+292 | 
+293 | // WithBoolean adds a boolean property to the tool schema.
+294 | // It accepts property options to configure the boolean property's behavior and constraints.
+295 | func WithBoolean(name string, opts ...PropertyOption) ToolOption {
+296 | 	return func(t *Tool) {
+297 | 		schema := map[string]interface{}{
+298 | 			"type": "boolean",
+299 | 		}
+300 | 
+301 | 		for _, opt := range opts {
+302 | 			opt(schema)
+303 | 		}
+304 | 
+305 | 		// Remove required from property schema and add to InputSchema.required
+306 | 		if required, ok := schema["required"].(bool); ok && required {
+307 | 			delete(schema, "required")
+308 | 			t.InputSchema.Required = append(t.InputSchema.Required, name)
+309 | 		}
+310 | 
+311 | 		t.InputSchema.Properties[name] = schema
+312 | 	}
+313 | }
+314 | 
+315 | // WithNumber adds a number property to the tool schema.
+316 | // It accepts property options to configure the number property's behavior and constraints.
+317 | func WithNumber(name string, opts ...PropertyOption) ToolOption {
+318 | 	return func(t *Tool) {
+319 | 		schema := map[string]interface{}{
+320 | 			"type": "number",
+321 | 		}
+322 | 
+323 | 		for _, opt := range opts {
+324 | 			opt(schema)
+325 | 		}
+326 | 
+327 | 		// Remove required from property schema and add to InputSchema.required
+328 | 		if required, ok := schema["required"].(bool); ok && required {
+329 | 			delete(schema, "required")
+330 | 			t.InputSchema.Required = append(t.InputSchema.Required, name)
+331 | 		}
+332 | 
+333 | 		t.InputSchema.Properties[name] = schema
+334 | 	}
+335 | }
+336 | 
+337 | // WithString adds a string property to the tool schema.
+338 | // It accepts property options to configure the string property's behavior and constraints.
+339 | func WithString(name string, opts ...PropertyOption) ToolOption {
+340 | 	return func(t *Tool) {
+341 | 		schema := map[string]interface{}{
+342 | 			"type": "string",
+343 | 		}
+344 | 
+345 | 		for _, opt := range opts {
+346 | 			opt(schema)
+347 | 		}
+348 | 
+349 | 		// Remove required from property schema and add to InputSchema.required
+350 | 		if required, ok := schema["required"].(bool); ok && required {
+351 | 			delete(schema, "required")
+352 | 			t.InputSchema.Required = append(t.InputSchema.Required, name)
+353 | 		}
+354 | 
+355 | 		t.InputSchema.Properties[name] = schema
+356 | 	}
+357 | }
+358 | 
+359 | // WithObject adds an object property to the tool schema.
+360 | // It accepts property options to configure the object property's behavior and constraints.
+361 | func WithObject(name string, opts ...PropertyOption) ToolOption {
+362 | 	return func(t *Tool) {
+363 | 		schema := map[string]interface{}{
+364 | 			"type":       "object",
+365 | 			"properties": map[string]interface{}{},
+366 | 		}
+367 | 
+368 | 		for _, opt := range opts {
+369 | 			opt(schema)
+370 | 		}
+371 | 
+372 | 		// Remove required from property schema and add to InputSchema.required
+373 | 		if required, ok := schema["required"].(bool); ok && required {
+374 | 			delete(schema, "required")
+375 | 			t.InputSchema.Required = append(t.InputSchema.Required, name)
+376 | 		}
+377 | 
+378 | 		t.InputSchema.Properties[name] = schema
+379 | 	}
+380 | }
+381 | 
+382 | // WithArray adds an array property to the tool schema.
+383 | // It accepts property options to configure the array property's behavior and constraints.
+384 | func WithArray(name string, opts ...PropertyOption) ToolOption {
+385 | 	return func(t *Tool) {
+386 | 		schema := map[string]interface{}{
+387 | 			"type": "array",
+388 | 		}
+389 | 
+390 | 		for _, opt := range opts {
+391 | 			opt(schema)
+392 | 		}
+393 | 
+394 | 		// Remove required from property schema and add to InputSchema.required
+395 | 		if required, ok := schema["required"].(bool); ok && required {
+396 | 			delete(schema, "required")
+397 | 			t.InputSchema.Required = append(t.InputSchema.Required, name)
+398 | 		}
+399 | 
+400 | 		t.InputSchema.Properties[name] = schema
+401 | 	}
+402 | }
+403 | 
+404 | // Properties defines the properties for an object schema
+405 | func Properties(props map[string]interface{}) PropertyOption {
+406 | 	return func(schema map[string]interface{}) {
+407 | 		schema["properties"] = props
+408 | 	}
+409 | }
+410 | 
+411 | // AdditionalProperties specifies whether additional properties are allowed in the object
+412 | // or defines a schema for additional properties
+413 | func AdditionalProperties(schema interface{}) PropertyOption {
+414 | 	return func(schemaMap map[string]interface{}) {
+415 | 		schemaMap["additionalProperties"] = schema
+416 | 	}
+417 | }
+418 | 
+419 | // MinProperties sets the minimum number of properties for an object
+420 | func MinProperties(min int) PropertyOption {
+421 | 	return func(schema map[string]interface{}) {
+422 | 		schema["minProperties"] = min
+423 | 	}
+424 | }
+425 | 
+426 | // MaxProperties sets the maximum number of properties for an object
+427 | func MaxProperties(max int) PropertyOption {
+428 | 	return func(schema map[string]interface{}) {
+429 | 		schema["maxProperties"] = max
+430 | 	}
+431 | }
+432 | 
+433 | // PropertyNames defines a schema for property names in an object
+434 | func PropertyNames(schema map[string]interface{}) PropertyOption {
+435 | 	return func(schemaMap map[string]interface{}) {
+436 | 		schemaMap["propertyNames"] = schema
+437 | 	}
+438 | }
+439 | 
+440 | // Items defines the schema for array items
+441 | func Items(schema interface{}) PropertyOption {
+442 | 	return func(schemaMap map[string]interface{}) {
+443 | 		schemaMap["items"] = schema
+444 | 	}
+445 | }
+446 | 
+447 | // MinItems sets the minimum number of items for an array
+448 | func MinItems(min int) PropertyOption {
+449 | 	return func(schema map[string]interface{}) {
+450 | 		schema["minItems"] = min
+451 | 	}
+452 | }
+453 | 
+454 | // MaxItems sets the maximum number of items for an array
+455 | func MaxItems(max int) PropertyOption {
+456 | 	return func(schema map[string]interface{}) {
+457 | 		schema["maxItems"] = max
+458 | 	}
+459 | }
+460 | 
+461 | // UniqueItems specifies whether array items must be unique
+462 | func UniqueItems(unique bool) PropertyOption {
+463 | 	return func(schema map[string]interface{}) {
+464 | 		schema["uniqueItems"] = unique
+465 | 	}
+466 | }
+467 | 
+
+
+--------------------------------------------------------------------------------
+/mcp/tools_test.go:
+--------------------------------------------------------------------------------
+  1 | package mcp
+  2 | 
+  3 | import (
+  4 | 	"encoding/json"
+  5 | 	"testing"
+  6 | 
+  7 | 	"github.com/stretchr/testify/assert"
+  8 | )
+  9 | 
+ 10 | // TestToolWithBothSchemasError verifies that there will be feedback if the
+ 11 | // developer mixes raw schema with a schema provided via DSL.
+ 12 | func TestToolWithBothSchemasError(t *testing.T) {
+ 13 | 	// Create a tool with both schemas set
+ 14 | 	tool := NewTool("dual-schema-tool",
+ 15 | 		WithDescription("A tool with both schemas set"),
+ 16 | 		WithString("input", Description("Test input")),
+ 17 | 	)
+ 18 | 
+ 19 | 	_, err := json.Marshal(tool)
+ 20 | 	assert.Nil(t, err)
+ 21 | 
+ 22 | 	// Set the RawInputSchema as well - this should conflict with the InputSchema
+ 23 | 	// Note: InputSchema.Type is explicitly set to "object" in NewTool
+ 24 | 	tool.RawInputSchema = json.RawMessage(`{"type":"string"}`)
+ 25 | 
+ 26 | 	// Attempt to marshal to JSON
+ 27 | 	_, err = json.Marshal(tool)
+ 28 | 
+ 29 | 	// Should return an error
+ 30 | 	assert.ErrorIs(t, err, errToolSchemaConflict)
+ 31 | }
+ 32 | 
+ 33 | func TestToolWithRawSchema(t *testing.T) {
+ 34 | 	// Create a complex raw schema
+ 35 | 	rawSchema := json.RawMessage(`{
+ 36 | 		"type": "object",
+ 37 | 		"properties": {
+ 38 | 			"query": {"type": "string", "description": "Search query"},
+ 39 | 			"limit": {"type": "integer", "minimum": 1, "maximum": 50}
+ 40 | 		},
+ 41 | 		"required": ["query"]
+ 42 | 	}`)
+ 43 | 
+ 44 | 	// Create a tool with raw schema
+ 45 | 	tool := NewToolWithRawSchema("search-tool", "Search API", rawSchema)
+ 46 | 
+ 47 | 	// Marshal to JSON
+ 48 | 	data, err := json.Marshal(tool)
+ 49 | 	assert.NoError(t, err)
+ 50 | 
+ 51 | 	// Unmarshal to verify the structure
+ 52 | 	var result map[string]interface{}
+ 53 | 	err = json.Unmarshal(data, &result)
+ 54 | 	assert.NoError(t, err)
+ 55 | 
+ 56 | 	// Verify tool properties
+ 57 | 	assert.Equal(t, "search-tool", result["name"])
+ 58 | 	assert.Equal(t, "Search API", result["description"])
+ 59 | 
+ 60 | 	// Verify schema was properly included
+ 61 | 	schema, ok := result["inputSchema"].(map[string]interface{})
+ 62 | 	assert.True(t, ok)
+ 63 | 	assert.Equal(t, "object", schema["type"])
+ 64 | 
+ 65 | 	properties, ok := schema["properties"].(map[string]interface{})
+ 66 | 	assert.True(t, ok)
+ 67 | 
+ 68 | 	query, ok := properties["query"].(map[string]interface{})
+ 69 | 	assert.True(t, ok)
+ 70 | 	assert.Equal(t, "string", query["type"])
+ 71 | 
+ 72 | 	required, ok := schema["required"].([]interface{})
+ 73 | 	assert.True(t, ok)
+ 74 | 	assert.Contains(t, required, "query")
+ 75 | }
+ 76 | 
+ 77 | func TestUnmarshalToolWithRawSchema(t *testing.T) {
+ 78 | 	// Create a complex raw schema
+ 79 | 	rawSchema := json.RawMessage(`{
+ 80 | 		"type": "object",
+ 81 | 		"properties": {
+ 82 | 			"query": {"type": "string", "description": "Search query"},
+ 83 | 			"limit": {"type": "integer", "minimum": 1, "maximum": 50}
+ 84 | 		},
+ 85 | 		"required": ["query"]
+ 86 | 	}`)
+ 87 | 
+ 88 | 	// Create a tool with raw schema
+ 89 | 	tool := NewToolWithRawSchema("search-tool", "Search API", rawSchema)
+ 90 | 
+ 91 | 	// Marshal to JSON
+ 92 | 	data, err := json.Marshal(tool)
+ 93 | 	assert.NoError(t, err)
+ 94 | 
+ 95 | 	// Unmarshal to verify the structure
+ 96 | 	var toolUnmarshalled Tool
+ 97 | 	err = json.Unmarshal(data, &toolUnmarshalled)
+ 98 | 	assert.NoError(t, err)
+ 99 | 
+100 | 	// Verify tool properties
+101 | 	assert.Equal(t, tool.Name, toolUnmarshalled.Name)
+102 | 	assert.Equal(t, tool.Description, toolUnmarshalled.Description)
+103 | 
+104 | 	// Verify schema was properly included
+105 | 	assert.Equal(t, "object", toolUnmarshalled.InputSchema.Type)
+106 | 	assert.Contains(t, toolUnmarshalled.InputSchema.Properties, "query")
+107 | 	assert.Subset(t, toolUnmarshalled.InputSchema.Properties["query"], map[string]interface{}{
+108 | 		"type":        "string",
+109 | 		"description": "Search query",
+110 | 	})
+111 | 	assert.Contains(t, toolUnmarshalled.InputSchema.Properties, "limit")
+112 | 	assert.Subset(t, toolUnmarshalled.InputSchema.Properties["limit"], map[string]interface{}{
+113 | 		"type":    "integer",
+114 | 		"minimum": 1.0,
+115 | 		"maximum": 50.0,
+116 | 	})
+117 | 	assert.Subset(t, toolUnmarshalled.InputSchema.Required, []string{"query"})
+118 | }
+119 | 
+120 | func TestUnmarshalToolWithoutRawSchema(t *testing.T) {
+121 | 	// Create a tool with both schemas set
+122 | 	tool := NewTool("dual-schema-tool",
+123 | 		WithDescription("A tool with both schemas set"),
+124 | 		WithString("input", Description("Test input")),
+125 | 	)
+126 | 
+127 | 	data, err := json.Marshal(tool)
+128 | 	assert.Nil(t, err)
+129 | 
+130 | 	// Unmarshal to verify the structure
+131 | 	var toolUnmarshalled Tool
+132 | 	err = json.Unmarshal(data, &toolUnmarshalled)
+133 | 	assert.NoError(t, err)
+134 | 
+135 | 	// Verify tool properties
+136 | 	assert.Equal(t, tool.Name, toolUnmarshalled.Name)
+137 | 	assert.Equal(t, tool.Description, toolUnmarshalled.Description)
+138 | 	assert.Subset(t, toolUnmarshalled.InputSchema.Properties["input"], map[string]interface{}{
+139 | 		"type":        "string",
+140 | 		"description": "Test input",
+141 | 	})
+142 | 	assert.Empty(t, toolUnmarshalled.InputSchema.Required)
+143 | 	assert.Empty(t, toolUnmarshalled.RawInputSchema)
+144 | }
+145 | 
+146 | func TestToolWithObjectAndArray(t *testing.T) {
+147 | 	// Create a tool with both object and array properties
+148 | 	tool := NewTool("reading-list",
+149 | 		WithDescription("A tool for managing reading lists"),
+150 | 		WithObject("preferences",
+151 | 			Description("User preferences for the reading list"),
+152 | 			Properties(map[string]interface{}{
+153 | 				"theme": map[string]interface{}{
+154 | 					"type":        "string",
+155 | 					"description": "UI theme preference",
+156 | 					"enum":        []string{"light", "dark"},
+157 | 				},
+158 | 				"maxItems": map[string]interface{}{
+159 | 					"type":        "number",
+160 | 					"description": "Maximum number of items in the list",
+161 | 					"minimum":     1,
+162 | 					"maximum":     100,
+163 | 				},
+164 | 			})),
+165 | 		WithArray("books",
+166 | 			Description("List of books to read"),
+167 | 			Required(),
+168 | 			Items(map[string]interface{}{
+169 | 				"type": "object",
+170 | 				"properties": map[string]interface{}{
+171 | 					"title": map[string]interface{}{
+172 | 						"type":        "string",
+173 | 						"description": "Book title",
+174 | 						"required":    true,
+175 | 					},
+176 | 					"author": map[string]interface{}{
+177 | 						"type":        "string",
+178 | 						"description": "Book author",
+179 | 					},
+180 | 					"year": map[string]interface{}{
+181 | 						"type":        "number",
+182 | 						"description": "Publication year",
+183 | 						"minimum":     1000,
+184 | 					},
+185 | 				},
+186 | 			})))
+187 | 
+188 | 	// Marshal to JSON
+189 | 	data, err := json.Marshal(tool)
+190 | 	assert.NoError(t, err)
+191 | 
+192 | 	// Unmarshal to verify the structure
+193 | 	var result map[string]interface{}
+194 | 	err = json.Unmarshal(data, &result)
+195 | 	assert.NoError(t, err)
+196 | 
+197 | 	// Verify tool properties
+198 | 	assert.Equal(t, "reading-list", result["name"])
+199 | 	assert.Equal(t, "A tool for managing reading lists", result["description"])
+200 | 
+201 | 	// Verify schema was properly included
+202 | 	schema, ok := result["inputSchema"].(map[string]interface{})
+203 | 	assert.True(t, ok)
+204 | 	assert.Equal(t, "object", schema["type"])
+205 | 
+206 | 	// Verify properties
+207 | 	properties, ok := schema["properties"].(map[string]interface{})
+208 | 	assert.True(t, ok)
+209 | 
+210 | 	// Verify preferences object
+211 | 	preferences, ok := properties["preferences"].(map[string]interface{})
+212 | 	assert.True(t, ok)
+213 | 	assert.Equal(t, "object", preferences["type"])
+214 | 	assert.Equal(t, "User preferences for the reading list", preferences["description"])
+215 | 
+216 | 	prefProps, ok := preferences["properties"].(map[string]interface{})
+217 | 	assert.True(t, ok)
+218 | 	assert.Contains(t, prefProps, "theme")
+219 | 	assert.Contains(t, prefProps, "maxItems")
+220 | 
+221 | 	// Verify books array
+222 | 	books, ok := properties["books"].(map[string]interface{})
+223 | 	assert.True(t, ok)
+224 | 	assert.Equal(t, "array", books["type"])
+225 | 	assert.Equal(t, "List of books to read", books["description"])
+226 | 
+227 | 	// Verify array items schema
+228 | 	items, ok := books["items"].(map[string]interface{})
+229 | 	assert.True(t, ok)
+230 | 	assert.Equal(t, "object", items["type"])
+231 | 
+232 | 	itemProps, ok := items["properties"].(map[string]interface{})
+233 | 	assert.True(t, ok)
+234 | 	assert.Contains(t, itemProps, "title")
+235 | 	assert.Contains(t, itemProps, "author")
+236 | 	assert.Contains(t, itemProps, "year")
+237 | 
+238 | 	// Verify required fields
+239 | 	required, ok := schema["required"].([]interface{})
+240 | 	assert.True(t, ok)
+241 | 	assert.Contains(t, required, "books")
+242 | }
+243 | 
+
+
+--------------------------------------------------------------------------------
+/mcp/types.go:
+--------------------------------------------------------------------------------
+  1 | // Package mcp defines the core types and interfaces for the Model Control Protocol (MCP).
+  2 | // MCP is a protocol for communication between LLM-powered applications and their supporting services.
+  3 | package mcp
+  4 | 
+  5 | import (
+  6 | 	"encoding/json"
+  7 | 
+  8 | 	"github.com/yosida95/uritemplate/v3"
+  9 | )
+ 10 | 
+ 11 | type MCPMethod string
+ 12 | 
+ 13 | const (
+ 14 | 	// Initiates connection and negotiates protocol capabilities.
+ 15 | 	// https://spec.modelcontextprotocol.io/specification/2024-11-05/basic/lifecycle/#initialization
+ 16 | 	MethodInitialize MCPMethod = "initialize"
+ 17 | 
+ 18 | 	// Verifies connection liveness between client and server.
+ 19 | 	// https://spec.modelcontextprotocol.io/specification/2024-11-05/basic/utilities/ping/
+ 20 | 	MethodPing MCPMethod = "ping"
+ 21 | 
+ 22 | 	// Lists all available server resources.
+ 23 | 	// https://spec.modelcontextprotocol.io/specification/2024-11-05/server/resources/
+ 24 | 	MethodResourcesList MCPMethod = "resources/list"
+ 25 | 
+ 26 | 	// Provides URI templates for constructing resource URIs.
+ 27 | 	// https://spec.modelcontextprotocol.io/specification/2024-11-05/server/resources/
+ 28 | 	MethodResourcesTemplatesList MCPMethod = "resources/templates/list"
+ 29 | 
+ 30 | 	// Retrieves content of a specific resource by URI.
+ 31 | 	// https://spec.modelcontextprotocol.io/specification/2024-11-05/server/resources/
+ 32 | 	MethodResourcesRead MCPMethod = "resources/read"
+ 33 | 
+ 34 | 	// Lists all available prompt templates.
+ 35 | 	// https://spec.modelcontextprotocol.io/specification/2024-11-05/server/prompts/
+ 36 | 	MethodPromptsList MCPMethod = "prompts/list"
+ 37 | 
+ 38 | 	// Retrieves a specific prompt template with filled parameters.
+ 39 | 	// https://spec.modelcontextprotocol.io/specification/2024-11-05/server/prompts/
+ 40 | 	MethodPromptsGet MCPMethod = "prompts/get"
+ 41 | 
+ 42 | 	// Lists all available executable tools.
+ 43 | 	// https://spec.modelcontextprotocol.io/specification/2024-11-05/server/tools/
+ 44 | 	MethodToolsList MCPMethod = "tools/list"
+ 45 | 
+ 46 | 	// Invokes a specific tool with provided parameters.
+ 47 | 	// https://spec.modelcontextprotocol.io/specification/2024-11-05/server/tools/
+ 48 | 	MethodToolsCall MCPMethod = "tools/call"
+ 49 | )
+ 50 | 
+ 51 | type URITemplate struct {
+ 52 | 	*uritemplate.Template
+ 53 | }
+ 54 | 
+ 55 | func (t *URITemplate) MarshalJSON() ([]byte, error) {
+ 56 | 	return json.Marshal(t.Template.Raw())
+ 57 | }
+ 58 | 
+ 59 | func (t *URITemplate) UnmarshalJSON(data []byte) error {
+ 60 | 	var raw string
+ 61 | 	if err := json.Unmarshal(data, &raw); err != nil {
+ 62 | 		return err
+ 63 | 	}
+ 64 | 	template, err := uritemplate.New(raw)
+ 65 | 	if err != nil {
+ 66 | 		return err
+ 67 | 	}
+ 68 | 	t.Template = template
+ 69 | 	return nil
+ 70 | }
+ 71 | 
+ 72 | /* JSON-RPC types */
+ 73 | 
+ 74 | // JSONRPCMessage represents either a JSONRPCRequest, JSONRPCNotification, JSONRPCResponse, or JSONRPCError
+ 75 | type JSONRPCMessage interface{}
+ 76 | 
+ 77 | // LATEST_PROTOCOL_VERSION is the most recent version of the MCP protocol.
+ 78 | const LATEST_PROTOCOL_VERSION = "2024-11-05"
+ 79 | 
+ 80 | // JSONRPC_VERSION is the version of JSON-RPC used by MCP.
+ 81 | const JSONRPC_VERSION = "2.0"
+ 82 | 
+ 83 | // ProgressToken is used to associate progress notifications with the original request.
+ 84 | type ProgressToken interface{}
+ 85 | 
+ 86 | // Cursor is an opaque token used to represent a cursor for pagination.
+ 87 | type Cursor string
+ 88 | 
+ 89 | type Request struct {
+ 90 | 	Method string `json:"method"`
+ 91 | 	Params struct {
+ 92 | 		Meta *struct {
+ 93 | 			// If specified, the caller is requesting out-of-band progress
+ 94 | 			// notifications for this request (as represented by
+ 95 | 			// notifications/progress). The value of this parameter is an
+ 96 | 			// opaque token that will be attached to any subsequent
+ 97 | 			// notifications. The receiver is not obligated to provide these
+ 98 | 			// notifications.
+ 99 | 			ProgressToken ProgressToken `json:"progressToken,omitempty"`
+100 | 		} `json:"_meta,omitempty"`
+101 | 	} `json:"params,omitempty"`
+102 | }
+103 | 
+104 | type Params map[string]interface{}
+105 | 
+106 | type Notification struct {
+107 | 	Method string             `json:"method"`
+108 | 	Params NotificationParams `json:"params,omitempty"`
+109 | }
+110 | 
+111 | type NotificationParams struct {
+112 | 	// This parameter name is reserved by MCP to allow clients and
+113 | 	// servers to attach additional metadata to their notifications.
+114 | 	Meta map[string]interface{} `json:"_meta,omitempty"`
+115 | 
+116 | 	// Additional fields can be added to this map
+117 | 	AdditionalFields map[string]interface{} `json:"-"`
+118 | }
+119 | 
+120 | // MarshalJSON implements custom JSON marshaling
+121 | func (p NotificationParams) MarshalJSON() ([]byte, error) {
+122 | 	// Create a map to hold all fields
+123 | 	m := make(map[string]interface{})
+124 | 
+125 | 	// Add Meta if it exists
+126 | 	if p.Meta != nil {
+127 | 		m["_meta"] = p.Meta
+128 | 	}
+129 | 
+130 | 	// Add all additional fields
+131 | 	for k, v := range p.AdditionalFields {
+132 | 		// Ensure we don't override the _meta field
+133 | 		if k != "_meta" {
+134 | 			m[k] = v
+135 | 		}
+136 | 	}
+137 | 
+138 | 	return json.Marshal(m)
+139 | }
+140 | 
+141 | // UnmarshalJSON implements custom JSON unmarshaling
+142 | func (p *NotificationParams) UnmarshalJSON(data []byte) error {
+143 | 	// Create a map to hold all fields
+144 | 	var m map[string]interface{}
+145 | 	if err := json.Unmarshal(data, &m); err != nil {
+146 | 		return err
+147 | 	}
+148 | 
+149 | 	// Initialize maps if they're nil
+150 | 	if p.Meta == nil {
+151 | 		p.Meta = make(map[string]interface{})
+152 | 	}
+153 | 	if p.AdditionalFields == nil {
+154 | 		p.AdditionalFields = make(map[string]interface{})
+155 | 	}
+156 | 
+157 | 	// Process all fields
+158 | 	for k, v := range m {
+159 | 		if k == "_meta" {
+160 | 			// Handle Meta field
+161 | 			if meta, ok := v.(map[string]interface{}); ok {
+162 | 				p.Meta = meta
+163 | 			}
+164 | 		} else {
+165 | 			// Handle additional fields
+166 | 			p.AdditionalFields[k] = v
+167 | 		}
+168 | 	}
+169 | 
+170 | 	return nil
+171 | }
+172 | 
+173 | type Result struct {
+174 | 	// This result property is reserved by the protocol to allow clients and
+175 | 	// servers to attach additional metadata to their responses.
+176 | 	Meta map[string]interface{} `json:"_meta,omitempty"`
+177 | }
+178 | 
+179 | // RequestId is a uniquely identifying ID for a request in JSON-RPC.
+180 | // It can be any JSON-serializable value, typically a number or string.
+181 | type RequestId interface{}
+182 | 
+183 | // JSONRPCRequest represents a request that expects a response.
+184 | type JSONRPCRequest struct {
+185 | 	JSONRPC string      `json:"jsonrpc"`
+186 | 	ID      RequestId   `json:"id"`
+187 | 	Params  interface{} `json:"params,omitempty"`
+188 | 	Request
+189 | }
+190 | 
+191 | // JSONRPCNotification represents a notification which does not expect a response.
+192 | type JSONRPCNotification struct {
+193 | 	JSONRPC string `json:"jsonrpc"`
+194 | 	Notification
+195 | }
+196 | 
+197 | // JSONRPCResponse represents a successful (non-error) response to a request.
+198 | type JSONRPCResponse struct {
+199 | 	JSONRPC string      `json:"jsonrpc"`
+200 | 	ID      RequestId   `json:"id"`
+201 | 	Result  interface{} `json:"result"`
+202 | }
+203 | 
+204 | // JSONRPCError represents a non-successful (error) response to a request.
+205 | type JSONRPCError struct {
+206 | 	JSONRPC string    `json:"jsonrpc"`
+207 | 	ID      RequestId `json:"id"`
+208 | 	Error   struct {
+209 | 		// The error type that occurred.
+210 | 		Code int `json:"code"`
+211 | 		// A short description of the error. The message SHOULD be limited
+212 | 		// to a concise single sentence.
+213 | 		Message string `json:"message"`
+214 | 		// Additional information about the error. The value of this member
+215 | 		// is defined by the sender (e.g. detailed error information, nested errors etc.).
+216 | 		Data interface{} `json:"data,omitempty"`
+217 | 	} `json:"error"`
+218 | }
+219 | 
+220 | // Standard JSON-RPC error codes
+221 | const (
+222 | 	PARSE_ERROR      = -32700
+223 | 	INVALID_REQUEST  = -32600
+224 | 	METHOD_NOT_FOUND = -32601
+225 | 	INVALID_PARAMS   = -32602
+226 | 	INTERNAL_ERROR   = -32603
+227 | )
+228 | 
+229 | /* Empty result */
+230 | 
+231 | // EmptyResult represents a response that indicates success but carries no data.
+232 | type EmptyResult Result
+233 | 
+234 | /* Cancellation */
+235 | 
+236 | // CancelledNotification can be sent by either side to indicate that it is
+237 | // cancelling a previously-issued request.
+238 | //
+239 | // The request SHOULD still be in-flight, but due to communication latency, it
+240 | // is always possible that this notification MAY arrive after the request has
+241 | // already finished.
+242 | //
+243 | // This notification indicates that the result will be unused, so any
+244 | // associated processing SHOULD cease.
+245 | //
+246 | // A client MUST NOT attempt to cancel its `initialize` request.
+247 | type CancelledNotification struct {
+248 | 	Notification
+249 | 	Params struct {
+250 | 		// The ID of the request to cancel.
+251 | 		//
+252 | 		// This MUST correspond to the ID of a request previously issued
+253 | 		// in the same direction.
+254 | 		RequestId RequestId `json:"requestId"`
+255 | 
+256 | 		// An optional string describing the reason for the cancellation. This MAY
+257 | 		// be logged or presented to the user.
+258 | 		Reason string `json:"reason,omitempty"`
+259 | 	} `json:"params"`
+260 | }
+261 | 
+262 | /* Initialization */
+263 | 
+264 | // InitializeRequest is sent from the client to the server when it first
+265 | // connects, asking it to begin initialization.
+266 | type InitializeRequest struct {
+267 | 	Request
+268 | 	Params struct {
+269 | 		// The latest version of the Model Context Protocol that the client supports.
+270 | 		// The client MAY decide to support older versions as well.
+271 | 		ProtocolVersion string             `json:"protocolVersion"`
+272 | 		Capabilities    ClientCapabilities `json:"capabilities"`
+273 | 		ClientInfo      Implementation     `json:"clientInfo"`
+274 | 	} `json:"params"`
+275 | }
+276 | 
+277 | // InitializeResult is sent after receiving an initialize request from the
+278 | // client.
+279 | type InitializeResult struct {
+280 | 	Result
+281 | 	// The version of the Model Context Protocol that the server wants to use.
+282 | 	// This may not match the version that the client requested. If the client cannot
+283 | 	// support this version, it MUST disconnect.
+284 | 	ProtocolVersion string             `json:"protocolVersion"`
+285 | 	Capabilities    ServerCapabilities `json:"capabilities"`
+286 | 	ServerInfo      Implementation     `json:"serverInfo"`
+287 | 	// Instructions describing how to use the server and its features.
+288 | 	//
+289 | 	// This can be used by clients to improve the LLM's understanding of
+290 | 	// available tools, resources, etc. It can be thought of like a "hint" to the model.
+291 | 	// For example, this information MAY be added to the system prompt.
+292 | 	Instructions string `json:"instructions,omitempty"`
+293 | }
+294 | 
+295 | // InitializedNotification is sent from the client to the server after
+296 | // initialization has finished.
+297 | type InitializedNotification struct {
+298 | 	Notification
+299 | }
+300 | 
+301 | // ClientCapabilities represents capabilities a client may support. Known
+302 | // capabilities are defined here, in this schema, but this is not a closed set: any
+303 | // client can define its own, additional capabilities.
+304 | type ClientCapabilities struct {
+305 | 	// Experimental, non-standard capabilities that the client supports.
+306 | 	Experimental map[string]interface{} `json:"experimental,omitempty"`
+307 | 	// Present if the client supports listing roots.
+308 | 	Roots *struct {
+309 | 		// Whether the client supports notifications for changes to the roots list.
+310 | 		ListChanged bool `json:"listChanged,omitempty"`
+311 | 	} `json:"roots,omitempty"`
+312 | 	// Present if the client supports sampling from an LLM.
+313 | 	Sampling *struct{} `json:"sampling,omitempty"`
+314 | }
+315 | 
+316 | // ServerCapabilities represents capabilities that a server may support. Known
+317 | // capabilities are defined here, in this schema, but this is not a closed set: any
+318 | // server can define its own, additional capabilities.
+319 | type ServerCapabilities struct {
+320 | 	// Experimental, non-standard capabilities that the server supports.
+321 | 	Experimental map[string]interface{} `json:"experimental,omitempty"`
+322 | 	// Present if the server supports sending log messages to the client.
+323 | 	Logging *struct{} `json:"logging,omitempty"`
+324 | 	// Present if the server offers any prompt templates.
+325 | 	Prompts *struct {
+326 | 		// Whether this server supports notifications for changes to the prompt list.
+327 | 		ListChanged bool `json:"listChanged,omitempty"`
+328 | 	} `json:"prompts,omitempty"`
+329 | 	// Present if the server offers any resources to read.
+330 | 	Resources *struct {
+331 | 		// Whether this server supports subscribing to resource updates.
+332 | 		Subscribe bool `json:"subscribe,omitempty"`
+333 | 		// Whether this server supports notifications for changes to the resource
+334 | 		// list.
+335 | 		ListChanged bool `json:"listChanged,omitempty"`
+336 | 	} `json:"resources,omitempty"`
+337 | 	// Present if the server offers any tools to call.
+338 | 	Tools *struct {
+339 | 		// Whether this server supports notifications for changes to the tool list.
+340 | 		ListChanged bool `json:"listChanged,omitempty"`
+341 | 	} `json:"tools,omitempty"`
+342 | }
+343 | 
+344 | // Implementation describes the name and version of an MCP implementation.
+345 | type Implementation struct {
+346 | 	Name    string `json:"name"`
+347 | 	Version string `json:"version"`
+348 | }
+349 | 
+350 | /* Ping */
+351 | 
+352 | // PingRequest represents a ping, issued by either the server or the client,
+353 | // to check that the other party is still alive. The receiver must promptly respond,
+354 | // or else may be disconnected.
+355 | type PingRequest struct {
+356 | 	Request
+357 | }
+358 | 
+359 | /* Progress notifications */
+360 | 
+361 | // ProgressNotification is an out-of-band notification used to inform the
+362 | // receiver of a progress update for a long-running request.
+363 | type ProgressNotification struct {
+364 | 	Notification
+365 | 	Params struct {
+366 | 		// The progress token which was given in the initial request, used to
+367 | 		// associate this notification with the request that is proceeding.
+368 | 		ProgressToken ProgressToken `json:"progressToken"`
+369 | 		// The progress thus far. This should increase every time progress is made,
+370 | 		// even if the total is unknown.
+371 | 		Progress float64 `json:"progress"`
+372 | 		// Total number of items to process (or total progress required), if known.
+373 | 		Total float64 `json:"total,omitempty"`
+374 | 	} `json:"params"`
+375 | }
+376 | 
+377 | /* Pagination */
+378 | 
+379 | type PaginatedRequest struct {
+380 | 	Request
+381 | 	Params struct {
+382 | 		// An opaque token representing the current pagination position.
+383 | 		// If provided, the server should return results starting after this cursor.
+384 | 		Cursor Cursor `json:"cursor,omitempty"`
+385 | 	} `json:"params,omitempty"`
+386 | }
+387 | 
+388 | type PaginatedResult struct {
+389 | 	Result
+390 | 	// An opaque token representing the pagination position after the last
+391 | 	// returned result.
+392 | 	// If present, there may be more results available.
+393 | 	NextCursor Cursor `json:"nextCursor,omitempty"`
+394 | }
+395 | 
+396 | /* Resources */
+397 | 
+398 | // ListResourcesRequest is sent from the client to request a list of resources
+399 | // the server has.
+400 | type ListResourcesRequest struct {
+401 | 	PaginatedRequest
+402 | }
+403 | 
+404 | // ListResourcesResult is the server's response to a resources/list request
+405 | // from the client.
+406 | type ListResourcesResult struct {
+407 | 	PaginatedResult
+408 | 	Resources []Resource `json:"resources"`
+409 | }
+410 | 
+411 | // ListResourceTemplatesRequest is sent from the client to request a list of
+412 | // resource templates the server has.
+413 | type ListResourceTemplatesRequest struct {
+414 | 	PaginatedRequest
+415 | }
+416 | 
+417 | // ListResourceTemplatesResult is the server's response to a
+418 | // resources/templates/list request from the client.
+419 | type ListResourceTemplatesResult struct {
+420 | 	PaginatedResult
+421 | 	ResourceTemplates []ResourceTemplate `json:"resourceTemplates"`
+422 | }
+423 | 
+424 | // ReadResourceRequest is sent from the client to the server, to read a
+425 | // specific resource URI.
+426 | type ReadResourceRequest struct {
+427 | 	Request
+428 | 	Params struct {
+429 | 		// The URI of the resource to read. The URI can use any protocol; it is up
+430 | 		// to the server how to interpret it.
+431 | 		URI string `json:"uri"`
+432 | 		// Arguments to pass to the resource handler
+433 | 		Arguments map[string]interface{} `json:"arguments,omitempty"`
+434 | 	} `json:"params"`
+435 | }
+436 | 
+437 | // ReadResourceResult is the server's response to a resources/read request
+438 | // from the client.
+439 | type ReadResourceResult struct {
+440 | 	Result
+441 | 	Contents []ResourceContents `json:"contents"` // Can be TextResourceContents or BlobResourceContents
+442 | }
+443 | 
+444 | // ResourceListChangedNotification is an optional notification from the server
+445 | // to the client, informing it that the list of resources it can read from has
+446 | // changed. This may be issued by servers without any previous subscription from
+447 | // the client.
+448 | type ResourceListChangedNotification struct {
+449 | 	Notification
+450 | }
+451 | 
+452 | // SubscribeRequest is sent from the client to request resources/updated
+453 | // notifications from the server whenever a particular resource changes.
+454 | type SubscribeRequest struct {
+455 | 	Request
+456 | 	Params struct {
+457 | 		// The URI of the resource to subscribe to. The URI can use any protocol; it
+458 | 		// is up to the server how to interpret it.
+459 | 		URI string `json:"uri"`
+460 | 	} `json:"params"`
+461 | }
+462 | 
+463 | // UnsubscribeRequest is sent from the client to request cancellation of
+464 | // resources/updated notifications from the server. This should follow a previous
+465 | // resources/subscribe request.
+466 | type UnsubscribeRequest struct {
+467 | 	Request
+468 | 	Params struct {
+469 | 		// The URI of the resource to unsubscribe from.
+470 | 		URI string `json:"uri"`
+471 | 	} `json:"params"`
+472 | }
+473 | 
+474 | // ResourceUpdatedNotification is a notification from the server to the client,
+475 | // informing it that a resource has changed and may need to be read again. This
+476 | // should only be sent if the client previously sent a resources/subscribe request.
+477 | type ResourceUpdatedNotification struct {
+478 | 	Notification
+479 | 	Params struct {
+480 | 		// The URI of the resource that has been updated. This might be a sub-
+481 | 		// resource of the one that the client actually subscribed to.
+482 | 		URI string `json:"uri"`
+483 | 	} `json:"params"`
+484 | }
+485 | 
+486 | // Resource represents a known resource that the server is capable of reading.
+487 | type Resource struct {
+488 | 	Annotated
+489 | 	// The URI of this resource.
+490 | 	URI string `json:"uri"`
+491 | 	// A human-readable name for this resource.
+492 | 	//
+493 | 	// This can be used by clients to populate UI elements.
+494 | 	Name string `json:"name"`
+495 | 	// A description of what this resource represents.
+496 | 	//
+497 | 	// This can be used by clients to improve the LLM's understanding of
+498 | 	// available resources. It can be thought of like a "hint" to the model.
+499 | 	Description string `json:"description,omitempty"`
+500 | 	// The MIME type of this resource, if known.
+501 | 	MIMEType string `json:"mimeType,omitempty"`
+502 | }
+503 | 
+504 | // ResourceTemplate represents a template description for resources available
+505 | // on the server.
+506 | type ResourceTemplate struct {
+507 | 	Annotated
+508 | 	// A URI template (according to RFC 6570) that can be used to construct
+509 | 	// resource URIs.
+510 | 	URITemplate *URITemplate `json:"uriTemplate"`
+511 | 	// A human-readable name for the type of resource this template refers to.
+512 | 	//
+513 | 	// This can be used by clients to populate UI elements.
+514 | 	Name string `json:"name"`
+515 | 	// A description of what this template is for.
+516 | 	//
+517 | 	// This can be used by clients to improve the LLM's understanding of
+518 | 	// available resources. It can be thought of like a "hint" to the model.
+519 | 	Description string `json:"description,omitempty"`
+520 | 	// The MIME type for all resources that match this template. This should only
+521 | 	// be included if all resources matching this template have the same type.
+522 | 	MIMEType string `json:"mimeType,omitempty"`
+523 | }
+524 | 
+525 | // ResourceContents represents the contents of a specific resource or sub-
+526 | // resource.
+527 | type ResourceContents interface {
+528 | 	isResourceContents()
+529 | }
+530 | 
+531 | type TextResourceContents struct {
+532 | 	// The URI of this resource.
+533 | 	URI string `json:"uri"`
+534 | 	// The MIME type of this resource, if known.
+535 | 	MIMEType string `json:"mimeType,omitempty"`
+536 | 	// The text of the item. This must only be set if the item can actually be
+537 | 	// represented as text (not binary data).
+538 | 	Text string `json:"text"`
+539 | }
+540 | 
+541 | func (TextResourceContents) isResourceContents() {}
+542 | 
+543 | type BlobResourceContents struct {
+544 | 	// The URI of this resource.
+545 | 	URI string `json:"uri"`
+546 | 	// The MIME type of this resource, if known.
+547 | 	MIMEType string `json:"mimeType,omitempty"`
+548 | 	// A base64-encoded string representing the binary data of the item.
+549 | 	Blob string `json:"blob"`
+550 | }
+551 | 
+552 | func (BlobResourceContents) isResourceContents() {}
+553 | 
+554 | /* Logging */
+555 | 
+556 | // SetLevelRequest is a request from the client to the server, to enable or
+557 | // adjust logging.
+558 | type SetLevelRequest struct {
+559 | 	Request
+560 | 	Params struct {
+561 | 		// The level of logging that the client wants to receive from the server.
+562 | 		// The server should send all logs at this level and higher (i.e., more severe) to
+563 | 		// the client as notifications/logging/message.
+564 | 		Level LoggingLevel `json:"level"`
+565 | 	} `json:"params"`
+566 | }
+567 | 
+568 | // LoggingMessageNotification is a notification of a log message passed from
+569 | // server to client. If no logging/setLevel request has been sent from the client,
+570 | // the server MAY decide which messages to send automatically.
+571 | type LoggingMessageNotification struct {
+572 | 	Notification
+573 | 	Params struct {
+574 | 		// The severity of this log message.
+575 | 		Level LoggingLevel `json:"level"`
+576 | 		// An optional name of the logger issuing this message.
+577 | 		Logger string `json:"logger,omitempty"`
+578 | 		// The data to be logged, such as a string message or an object. Any JSON
+579 | 		// serializable type is allowed here.
+580 | 		Data interface{} `json:"data"`
+581 | 	} `json:"params"`
+582 | }
+583 | 
+584 | // LoggingLevel represents the severity of a log message.
+585 | //
+586 | // These map to syslog message severities, as specified in RFC-5424:
+587 | // https://datatracker.ietf.org/doc/html/rfc5424#section-6.2.1
+588 | type LoggingLevel string
+589 | 
+590 | const (
+591 | 	LoggingLevelDebug     LoggingLevel = "debug"
+592 | 	LoggingLevelInfo      LoggingLevel = "info"
+593 | 	LoggingLevelNotice    LoggingLevel = "notice"
+594 | 	LoggingLevelWarning   LoggingLevel = "warning"
+595 | 	LoggingLevelError     LoggingLevel = "error"
+596 | 	LoggingLevelCritical  LoggingLevel = "critical"
+597 | 	LoggingLevelAlert     LoggingLevel = "alert"
+598 | 	LoggingLevelEmergency LoggingLevel = "emergency"
+599 | )
+600 | 
+601 | /* Sampling */
+602 | 
+603 | // CreateMessageRequest is a request from the server to sample an LLM via the
+604 | // client. The client has full discretion over which model to select. The client
+605 | // should also inform the user before beginning sampling, to allow them to inspect
+606 | // the request (human in the loop) and decide whether to approve it.
+607 | type CreateMessageRequest struct {
+608 | 	Request
+609 | 	Params struct {
+610 | 		Messages         []SamplingMessage `json:"messages"`
+611 | 		ModelPreferences *ModelPreferences `json:"modelPreferences,omitempty"`
+612 | 		SystemPrompt     string            `json:"systemPrompt,omitempty"`
+613 | 		IncludeContext   string            `json:"includeContext,omitempty"`
+614 | 		Temperature      float64           `json:"temperature,omitempty"`
+615 | 		MaxTokens        int               `json:"maxTokens"`
+616 | 		StopSequences    []string          `json:"stopSequences,omitempty"`
+617 | 		Metadata         interface{}       `json:"metadata,omitempty"`
+618 | 	} `json:"params"`
+619 | }
+620 | 
+621 | // CreateMessageResult is the client's response to a sampling/create_message
+622 | // request from the server. The client should inform the user before returning the
+623 | // sampled message, to allow them to inspect the response (human in the loop) and
+624 | // decide whether to allow the server to see it.
+625 | type CreateMessageResult struct {
+626 | 	Result
+627 | 	SamplingMessage
+628 | 	// The name of the model that generated the message.
+629 | 	Model string `json:"model"`
+630 | 	// The reason why sampling stopped, if known.
+631 | 	StopReason string `json:"stopReason,omitempty"`
+632 | }
+633 | 
+634 | // SamplingMessage describes a message issued to or received from an LLM API.
+635 | type SamplingMessage struct {
+636 | 	Role    Role        `json:"role"`
+637 | 	Content interface{} `json:"content"` // Can be TextContent or ImageContent
+638 | }
+639 | 
+640 | // Annotated is the base for objects that include optional annotations for the
+641 | // client. The client can use annotations to inform how objects are used or
+642 | // displayed
+643 | type Annotated struct {
+644 | 	Annotations *struct {
+645 | 		// Describes who the intended customer of this object or data is.
+646 | 		//
+647 | 		// It can include multiple entries to indicate content useful for multiple
+648 | 		// audiences (e.g., `["user", "assistant"]`).
+649 | 		Audience []Role `json:"audience,omitempty"`
+650 | 
+651 | 		// Describes how important this data is for operating the server.
+652 | 		//
+653 | 		// A value of 1 means "most important," and indicates that the data is
+654 | 		// effectively required, while 0 means "least important," and indicates that
+655 | 		// the data is entirely optional.
+656 | 		Priority float64 `json:"priority,omitempty"`
+657 | 	} `json:"annotations,omitempty"`
+658 | }
+659 | 
+660 | type Content interface {
+661 | 	isContent()
+662 | }
+663 | 
+664 | // TextContent represents text provided to or from an LLM.
+665 | // It must have Type set to "text".
+666 | type TextContent struct {
+667 | 	Annotated
+668 | 	Type string `json:"type"` // Must be "text"
+669 | 	// The text content of the message.
+670 | 	Text string `json:"text"`
+671 | }
+672 | 
+673 | func (TextContent) isContent() {}
+674 | 
+675 | // ImageContent represents an image provided to or from an LLM.
+676 | // It must have Type set to "image".
+677 | type ImageContent struct {
+678 | 	Annotated
+679 | 	Type string `json:"type"` // Must be "image"
+680 | 	// The base64-encoded image data.
+681 | 	Data string `json:"data"`
+682 | 	// The MIME type of the image. Different providers may support different image types.
+683 | 	MIMEType string `json:"mimeType"`
+684 | }
+685 | 
+686 | func (ImageContent) isContent() {}
+687 | 
+688 | // EmbeddedResource represents the contents of a resource, embedded into a prompt or tool call result.
+689 | //
+690 | // It is up to the client how best to render embedded resources for the
+691 | // benefit of the LLM and/or the user.
+692 | type EmbeddedResource struct {
+693 | 	Annotated
+694 | 	Type     string           `json:"type"`
+695 | 	Resource ResourceContents `json:"resource"`
+696 | }
+697 | 
+698 | func (EmbeddedResource) isContent() {}
+699 | 
+700 | // ModelPreferences represents the server's preferences for model selection,
+701 | // requested of the client during sampling.
+702 | //
+703 | // Because LLMs can vary along multiple dimensions, choosing the "best" modelis
+704 | // rarely straightforward.  Different models excel in different areas—some are
+705 | // faster but less capable, others are more capable but more expensive, and so
+706 | // on. This interface allows servers to express their priorities across multiple
+707 | // dimensions to help clients make an appropriate selection for their use case.
+708 | //
+709 | // These preferences are always advisory. The client MAY ignore them. It is also
+710 | // up to the client to decide how to interpret these preferences and how to
+711 | // balance them against other considerations.
+712 | type ModelPreferences struct {
+713 | 	// Optional hints to use for model selection.
+714 | 	//
+715 | 	// If multiple hints are specified, the client MUST evaluate them in order
+716 | 	// (such that the first match is taken).
+717 | 	//
+718 | 	// The client SHOULD prioritize these hints over the numeric priorities, but
+719 | 	// MAY still use the priorities to select from ambiguous matches.
+720 | 	Hints []ModelHint `json:"hints,omitempty"`
+721 | 
+722 | 	// How much to prioritize cost when selecting a model. A value of 0 means cost
+723 | 	// is not important, while a value of 1 means cost is the most important
+724 | 	// factor.
+725 | 	CostPriority float64 `json:"costPriority,omitempty"`
+726 | 
+727 | 	// How much to prioritize sampling speed (latency) when selecting a model. A
+728 | 	// value of 0 means speed is not important, while a value of 1 means speed is
+729 | 	// the most important factor.
+730 | 	SpeedPriority float64 `json:"speedPriority,omitempty"`
+731 | 
+732 | 	// How much to prioritize intelligence and capabilities when selecting a
+733 | 	// model. A value of 0 means intelligence is not important, while a value of 1
+734 | 	// means intelligence is the most important factor.
+735 | 	IntelligencePriority float64 `json:"intelligencePriority,omitempty"`
+736 | }
+737 | 
+738 | // ModelHint represents hints to use for model selection.
+739 | //
+740 | // Keys not declared here are currently left unspecified by the spec and are up
+741 | // to the client to interpret.
+742 | type ModelHint struct {
+743 | 	// A hint for a model name.
+744 | 	//
+745 | 	// The client SHOULD treat this as a substring of a model name; for example:
+746 | 	//  - `claude-3-5-sonnet` should match `claude-3-5-sonnet-20241022`
+747 | 	//  - `sonnet` should match `claude-3-5-sonnet-20241022`, `claude-3-sonnet-20240229`, etc.
+748 | 	//  - `claude` should match any Claude model
+749 | 	//
+750 | 	// The client MAY also map the string to a different provider's model name or
+751 | 	// a different model family, as long as it fills a similar niche; for example:
+752 | 	//  - `gemini-1.5-flash` could match `claude-3-haiku-20240307`
+753 | 	Name string `json:"name,omitempty"`
+754 | }
+755 | 
+756 | /* Autocomplete */
+757 | 
+758 | // CompleteRequest is a request from the client to the server, to ask for completion options.
+759 | type CompleteRequest struct {
+760 | 	Request
+761 | 	Params struct {
+762 | 		Ref      interface{} `json:"ref"` // Can be PromptReference or ResourceReference
+763 | 		Argument struct {
+764 | 			// The name of the argument
+765 | 			Name string `json:"name"`
+766 | 			// The value of the argument to use for completion matching.
+767 | 			Value string `json:"value"`
+768 | 		} `json:"argument"`
+769 | 	} `json:"params"`
+770 | }
+771 | 
+772 | // CompleteResult is the server's response to a completion/complete request
+773 | type CompleteResult struct {
+774 | 	Result
+775 | 	Completion struct {
+776 | 		// An array of completion values. Must not exceed 100 items.
+777 | 		Values []string `json:"values"`
+778 | 		// The total number of completion options available. This can exceed the
+779 | 		// number of values actually sent in the response.
+780 | 		Total int `json:"total,omitempty"`
+781 | 		// Indicates whether there are additional completion options beyond those
+782 | 		// provided in the current response, even if the exact total is unknown.
+783 | 		HasMore bool `json:"hasMore,omitempty"`
+784 | 	} `json:"completion"`
+785 | }
+786 | 
+787 | // ResourceReference is a reference to a resource or resource template definition.
+788 | type ResourceReference struct {
+789 | 	Type string `json:"type"`
+790 | 	// The URI or URI template of the resource.
+791 | 	URI string `json:"uri"`
+792 | }
+793 | 
+794 | // PromptReference identifies a prompt.
+795 | type PromptReference struct {
+796 | 	Type string `json:"type"`
+797 | 	// The name of the prompt or prompt template
+798 | 	Name string `json:"name"`
+799 | }
+800 | 
+801 | /* Roots */
+802 | 
+803 | // ListRootsRequest is sent from the server to request a list of root URIs from the client. Roots allow
+804 | // servers to ask for specific directories or files to operate on. A common example
+805 | // for roots is providing a set of repositories or directories a server should operate
+806 | // on.
+807 | //
+808 | // This request is typically used when the server needs to understand the file system
+809 | // structure or access specific locations that the client has permission to read from.
+810 | type ListRootsRequest struct {
+811 | 	Request
+812 | }
+813 | 
+814 | // ListRootsResult is the client's response to a roots/list request from the server.
+815 | // This result contains an array of Root objects, each representing a root directory
+816 | // or file that the server can operate on.
+817 | type ListRootsResult struct {
+818 | 	Result
+819 | 	Roots []Root `json:"roots"`
+820 | }
+821 | 
+822 | // Root represents a root directory or file that the server can operate on.
+823 | type Root struct {
+824 | 	// The URI identifying the root. This *must* start with file:// for now.
+825 | 	// This restriction may be relaxed in future versions of the protocol to allow
+826 | 	// other URI schemes.
+827 | 	URI string `json:"uri"`
+828 | 	// An optional name for the root. This can be used to provide a human-readable
+829 | 	// identifier for the root, which may be useful for display purposes or for
+830 | 	// referencing the root in other parts of the application.
+831 | 	Name string `json:"name,omitempty"`
+832 | }
+833 | 
+834 | // RootsListChangedNotification is a notification from the client to the
+835 | // server, informing it that the list of roots has changed.
+836 | // This notification should be sent whenever the client adds, removes, or modifies any root.
+837 | // The server should then request an updated list of roots using the ListRootsRequest.
+838 | type RootsListChangedNotification struct {
+839 | 	Notification
+840 | }
+841 | 
+842 | /* Client messages */
+843 | // ClientRequest represents any request that can be sent from client to server.
+844 | type ClientRequest interface{}
+845 | 
+846 | // ClientNotification represents any notification that can be sent from client to server.
+847 | type ClientNotification interface{}
+848 | 
+849 | // ClientResult represents any result that can be sent from client to server.
+850 | type ClientResult interface{}
+851 | 
+852 | /* Server messages */
+853 | // ServerRequest represents any request that can be sent from server to client.
+854 | type ServerRequest interface{}
+855 | 
+856 | // ServerNotification represents any notification that can be sent from server to client.
+857 | type ServerNotification interface{}
+858 | 
+859 | // ServerResult represents any result that can be sent from server to client.
+860 | type ServerResult interface{}
+861 | 
+
+
+--------------------------------------------------------------------------------
+/mcp/utils.go:
+--------------------------------------------------------------------------------
+  1 | package mcp
+  2 | 
+  3 | import (
+  4 | 	"encoding/json"
+  5 | 	"fmt"
+  6 | )
+  7 | 
+  8 | // ClientRequest types
+  9 | var _ ClientRequest = &PingRequest{}
+ 10 | var _ ClientRequest = &InitializeRequest{}
+ 11 | var _ ClientRequest = &CompleteRequest{}
+ 12 | var _ ClientRequest = &SetLevelRequest{}
+ 13 | var _ ClientRequest = &GetPromptRequest{}
+ 14 | var _ ClientRequest = &ListPromptsRequest{}
+ 15 | var _ ClientRequest = &ListResourcesRequest{}
+ 16 | var _ ClientRequest = &ReadResourceRequest{}
+ 17 | var _ ClientRequest = &SubscribeRequest{}
+ 18 | var _ ClientRequest = &UnsubscribeRequest{}
+ 19 | var _ ClientRequest = &CallToolRequest{}
+ 20 | var _ ClientRequest = &ListToolsRequest{}
+ 21 | 
+ 22 | // ClientNotification types
+ 23 | var _ ClientNotification = &CancelledNotification{}
+ 24 | var _ ClientNotification = &ProgressNotification{}
+ 25 | var _ ClientNotification = &InitializedNotification{}
+ 26 | var _ ClientNotification = &RootsListChangedNotification{}
+ 27 | 
+ 28 | // ClientResult types
+ 29 | var _ ClientResult = &EmptyResult{}
+ 30 | var _ ClientResult = &CreateMessageResult{}
+ 31 | var _ ClientResult = &ListRootsResult{}
+ 32 | 
+ 33 | // ServerRequest types
+ 34 | var _ ServerRequest = &PingRequest{}
+ 35 | var _ ServerRequest = &CreateMessageRequest{}
+ 36 | var _ ServerRequest = &ListRootsRequest{}
+ 37 | 
+ 38 | // ServerNotification types
+ 39 | var _ ServerNotification = &CancelledNotification{}
+ 40 | var _ ServerNotification = &ProgressNotification{}
+ 41 | var _ ServerNotification = &LoggingMessageNotification{}
+ 42 | var _ ServerNotification = &ResourceUpdatedNotification{}
+ 43 | var _ ServerNotification = &ResourceListChangedNotification{}
+ 44 | var _ ServerNotification = &ToolListChangedNotification{}
+ 45 | var _ ServerNotification = &PromptListChangedNotification{}
+ 46 | 
+ 47 | // ServerResult types
+ 48 | var _ ServerResult = &EmptyResult{}
+ 49 | var _ ServerResult = &InitializeResult{}
+ 50 | var _ ServerResult = &CompleteResult{}
+ 51 | var _ ServerResult = &GetPromptResult{}
+ 52 | var _ ServerResult = &ListPromptsResult{}
+ 53 | var _ ServerResult = &ListResourcesResult{}
+ 54 | var _ ServerResult = &ReadResourceResult{}
+ 55 | var _ ServerResult = &CallToolResult{}
+ 56 | var _ ServerResult = &ListToolsResult{}
+ 57 | 
+ 58 | // Helper functions for type assertions
+ 59 | 
+ 60 | // asType attempts to cast the given interface to the given type
+ 61 | func asType[T any](content interface{}) (*T, bool) {
+ 62 | 	tc, ok := content.(T)
+ 63 | 	if !ok {
+ 64 | 		return nil, false
+ 65 | 	}
+ 66 | 	return &tc, true
+ 67 | }
+ 68 | 
+ 69 | // AsTextContent attempts to cast the given interface to TextContent
+ 70 | func AsTextContent(content interface{}) (*TextContent, bool) {
+ 71 | 	return asType[TextContent](content)
+ 72 | }
+ 73 | 
+ 74 | // AsImageContent attempts to cast the given interface to ImageContent
+ 75 | func AsImageContent(content interface{}) (*ImageContent, bool) {
+ 76 | 	return asType[ImageContent](content)
+ 77 | }
+ 78 | 
+ 79 | // AsEmbeddedResource attempts to cast the given interface to EmbeddedResource
+ 80 | func AsEmbeddedResource(content interface{}) (*EmbeddedResource, bool) {
+ 81 | 	return asType[EmbeddedResource](content)
+ 82 | }
+ 83 | 
+ 84 | // AsTextResourceContents attempts to cast the given interface to TextResourceContents
+ 85 | func AsTextResourceContents(content interface{}) (*TextResourceContents, bool) {
+ 86 | 	return asType[TextResourceContents](content)
+ 87 | }
+ 88 | 
+ 89 | // AsBlobResourceContents attempts to cast the given interface to BlobResourceContents
+ 90 | func AsBlobResourceContents(content interface{}) (*BlobResourceContents, bool) {
+ 91 | 	return asType[BlobResourceContents](content)
+ 92 | }
+ 93 | 
+ 94 | // Helper function for JSON-RPC
+ 95 | 
+ 96 | // NewJSONRPCResponse creates a new JSONRPCResponse with the given id and result
+ 97 | func NewJSONRPCResponse(id RequestId, result Result) JSONRPCResponse {
+ 98 | 	return JSONRPCResponse{
+ 99 | 		JSONRPC: JSONRPC_VERSION,
+100 | 		ID:      id,
+101 | 		Result:  result,
+102 | 	}
+103 | }
+104 | 
+105 | // NewJSONRPCError creates a new JSONRPCResponse with the given id, code, and message
+106 | func NewJSONRPCError(
+107 | 	id RequestId,
+108 | 	code int,
+109 | 	message string,
+110 | 	data interface{},
+111 | ) JSONRPCError {
+112 | 	return JSONRPCError{
+113 | 		JSONRPC: JSONRPC_VERSION,
+114 | 		ID:      id,
+115 | 		Error: struct {
+116 | 			Code    int         `json:"code"`
+117 | 			Message string      `json:"message"`
+118 | 			Data    interface{} `json:"data,omitempty"`
+119 | 		}{
+120 | 			Code:    code,
+121 | 			Message: message,
+122 | 			Data:    data,
+123 | 		},
+124 | 	}
+125 | }
+126 | 
+127 | // Helper function for creating a progress notification
+128 | func NewProgressNotification(
+129 | 	token ProgressToken,
+130 | 	progress float64,
+131 | 	total *float64,
+132 | ) ProgressNotification {
+133 | 	notification := ProgressNotification{
+134 | 		Notification: Notification{
+135 | 			Method: "notifications/progress",
+136 | 		},
+137 | 		Params: struct {
+138 | 			ProgressToken ProgressToken `json:"progressToken"`
+139 | 			Progress      float64       `json:"progress"`
+140 | 			Total         float64       `json:"total,omitempty"`
+141 | 		}{
+142 | 			ProgressToken: token,
+143 | 			Progress:      progress,
+144 | 		},
+145 | 	}
+146 | 	if total != nil {
+147 | 		notification.Params.Total = *total
+148 | 	}
+149 | 	return notification
+150 | }
+151 | 
+152 | // Helper function for creating a logging message notification
+153 | func NewLoggingMessageNotification(
+154 | 	level LoggingLevel,
+155 | 	logger string,
+156 | 	data interface{},
+157 | ) LoggingMessageNotification {
+158 | 	return LoggingMessageNotification{
+159 | 		Notification: Notification{
+160 | 			Method: "notifications/message",
+161 | 		},
+162 | 		Params: struct {
+163 | 			Level  LoggingLevel `json:"level"`
+164 | 			Logger string       `json:"logger,omitempty"`
+165 | 			Data   interface{}  `json:"data"`
+166 | 		}{
+167 | 			Level:  level,
+168 | 			Logger: logger,
+169 | 			Data:   data,
+170 | 		},
+171 | 	}
+172 | }
+173 | 
+174 | // Helper function to create a new PromptMessage
+175 | func NewPromptMessage(role Role, content Content) PromptMessage {
+176 | 	return PromptMessage{
+177 | 		Role:    role,
+178 | 		Content: content,
+179 | 	}
+180 | }
+181 | 
+182 | // Helper function to create a new TextContent
+183 | func NewTextContent(text string) TextContent {
+184 | 	return TextContent{
+185 | 		Type: "text",
+186 | 		Text: text,
+187 | 	}
+188 | }
+189 | 
+190 | // Helper function to create a new ImageContent
+191 | func NewImageContent(data, mimeType string) ImageContent {
+192 | 	return ImageContent{
+193 | 		Type:     "image",
+194 | 		Data:     data,
+195 | 		MIMEType: mimeType,
+196 | 	}
+197 | }
+198 | 
+199 | // Helper function to create a new EmbeddedResource
+200 | func NewEmbeddedResource(resource ResourceContents) EmbeddedResource {
+201 | 	return EmbeddedResource{
+202 | 		Type:     "resource",
+203 | 		Resource: resource,
+204 | 	}
+205 | }
+206 | 
+207 | // NewToolResultText creates a new CallToolResult with a text content
+208 | func NewToolResultText(text string) *CallToolResult {
+209 | 	return &CallToolResult{
+210 | 		Content: []Content{
+211 | 			TextContent{
+212 | 				Type: "text",
+213 | 				Text: text,
+214 | 			},
+215 | 		},
+216 | 	}
+217 | }
+218 | 
+219 | // NewToolResultImage creates a new CallToolResult with both text and image content
+220 | func NewToolResultImage(text, imageData, mimeType string) *CallToolResult {
+221 | 	return &CallToolResult{
+222 | 		Content: []Content{
+223 | 			TextContent{
+224 | 				Type: "text",
+225 | 				Text: text,
+226 | 			},
+227 | 			ImageContent{
+228 | 				Type:     "image",
+229 | 				Data:     imageData,
+230 | 				MIMEType: mimeType,
+231 | 			},
+232 | 		},
+233 | 	}
+234 | }
+235 | 
+236 | // NewToolResultResource creates a new CallToolResult with an embedded resource
+237 | func NewToolResultResource(
+238 | 	text string,
+239 | 	resource ResourceContents,
+240 | ) *CallToolResult {
+241 | 	return &CallToolResult{
+242 | 		Content: []Content{
+243 | 			TextContent{
+244 | 				Type: "text",
+245 | 				Text: text,
+246 | 			},
+247 | 			EmbeddedResource{
+248 | 				Type:     "resource",
+249 | 				Resource: resource,
+250 | 			},
+251 | 		},
+252 | 	}
+253 | }
+254 | 
+255 | // NewToolResultError creates a new CallToolResult with an error message.
+256 | // Any errors that originate from the tool SHOULD be reported inside the result object.
+257 | func NewToolResultError(text string) *CallToolResult {
+258 | 	return &CallToolResult{
+259 | 		Content: []Content{
+260 | 			TextContent{
+261 | 				Type: "text",
+262 | 				Text: text,
+263 | 			},
+264 | 		},
+265 | 		IsError: true,
+266 | 	}
+267 | }
+268 | 
+269 | // NewListResourcesResult creates a new ListResourcesResult
+270 | func NewListResourcesResult(
+271 | 	resources []Resource,
+272 | 	nextCursor Cursor,
+273 | ) *ListResourcesResult {
+274 | 	return &ListResourcesResult{
+275 | 		PaginatedResult: PaginatedResult{
+276 | 			NextCursor: nextCursor,
+277 | 		},
+278 | 		Resources: resources,
+279 | 	}
+280 | }
+281 | 
+282 | // NewListResourceTemplatesResult creates a new ListResourceTemplatesResult
+283 | func NewListResourceTemplatesResult(
+284 | 	templates []ResourceTemplate,
+285 | 	nextCursor Cursor,
+286 | ) *ListResourceTemplatesResult {
+287 | 	return &ListResourceTemplatesResult{
+288 | 		PaginatedResult: PaginatedResult{
+289 | 			NextCursor: nextCursor,
+290 | 		},
+291 | 		ResourceTemplates: templates,
+292 | 	}
+293 | }
+294 | 
+295 | // NewReadResourceResult creates a new ReadResourceResult with text content
+296 | func NewReadResourceResult(text string) *ReadResourceResult {
+297 | 	return &ReadResourceResult{
+298 | 		Contents: []ResourceContents{
+299 | 			TextResourceContents{
+300 | 				Text: text,
+301 | 			},
+302 | 		},
+303 | 	}
+304 | }
+305 | 
+306 | // NewListPromptsResult creates a new ListPromptsResult
+307 | func NewListPromptsResult(
+308 | 	prompts []Prompt,
+309 | 	nextCursor Cursor,
+310 | ) *ListPromptsResult {
+311 | 	return &ListPromptsResult{
+312 | 		PaginatedResult: PaginatedResult{
+313 | 			NextCursor: nextCursor,
+314 | 		},
+315 | 		Prompts: prompts,
+316 | 	}
+317 | }
+318 | 
+319 | // NewGetPromptResult creates a new GetPromptResult
+320 | func NewGetPromptResult(
+321 | 	description string,
+322 | 	messages []PromptMessage,
+323 | ) *GetPromptResult {
+324 | 	return &GetPromptResult{
+325 | 		Description: description,
+326 | 		Messages:    messages,
+327 | 	}
+328 | }
+329 | 
+330 | // NewListToolsResult creates a new ListToolsResult
+331 | func NewListToolsResult(tools []Tool, nextCursor Cursor) *ListToolsResult {
+332 | 	return &ListToolsResult{
+333 | 		PaginatedResult: PaginatedResult{
+334 | 			NextCursor: nextCursor,
+335 | 		},
+336 | 		Tools: tools,
+337 | 	}
+338 | }
+339 | 
+340 | // NewInitializeResult creates a new InitializeResult
+341 | func NewInitializeResult(
+342 | 	protocolVersion string,
+343 | 	capabilities ServerCapabilities,
+344 | 	serverInfo Implementation,
+345 | 	instructions string,
+346 | ) *InitializeResult {
+347 | 	return &InitializeResult{
+348 | 		ProtocolVersion: protocolVersion,
+349 | 		Capabilities:    capabilities,
+350 | 		ServerInfo:      serverInfo,
+351 | 		Instructions:    instructions,
+352 | 	}
+353 | }
+354 | 
+355 | // Helper for formatting numbers in tool results
+356 | func FormatNumberResult(value float64) *CallToolResult {
+357 | 	return NewToolResultText(fmt.Sprintf("%.2f", value))
+358 | }
+359 | 
+360 | func ExtractString(data map[string]any, key string) string {
+361 | 	if value, ok := data[key]; ok {
+362 | 		if str, ok := value.(string); ok {
+363 | 			return str
+364 | 		}
+365 | 	}
+366 | 	return ""
+367 | }
+368 | 
+369 | func ExtractMap(data map[string]any, key string) map[string]any {
+370 | 	if value, ok := data[key]; ok {
+371 | 		if m, ok := value.(map[string]any); ok {
+372 | 			return m
+373 | 		}
+374 | 	}
+375 | 	return nil
+376 | }
+377 | 
+378 | func ParseContent(contentMap map[string]any) (Content, error) {
+379 | 	contentType := ExtractString(contentMap, "type")
+380 | 
+381 | 	switch contentType {
+382 | 	case "text":
+383 | 		text := ExtractString(contentMap, "text")
+384 | 		if text == "" {
+385 | 			return nil, fmt.Errorf("text is missing")
+386 | 		}
+387 | 		return NewTextContent(text), nil
+388 | 
+389 | 	case "image":
+390 | 		data := ExtractString(contentMap, "data")
+391 | 		mimeType := ExtractString(contentMap, "mimeType")
+392 | 		if data == "" || mimeType == "" {
+393 | 			return nil, fmt.Errorf("image data or mimeType is missing")
+394 | 		}
+395 | 		return NewImageContent(data, mimeType), nil
+396 | 
+397 | 	case "resource":
+398 | 		resourceMap := ExtractMap(contentMap, "resource")
+399 | 		if resourceMap == nil {
+400 | 			return nil, fmt.Errorf("resource is missing")
+401 | 		}
+402 | 
+403 | 		resourceContents, err := ParseResourceContents(resourceMap)
+404 | 		if err != nil {
+405 | 			return nil, err
+406 | 		}
+407 | 
+408 | 		return NewEmbeddedResource(resourceContents), nil
+409 | 	}
+410 | 
+411 | 	return nil, fmt.Errorf("unsupported content type: %s", contentType)
+412 | }
+413 | 
+414 | func ParseGetPromptResult(rawMessage *json.RawMessage) (*GetPromptResult, error) {
+415 | 	var jsonContent map[string]any
+416 | 	if err := json.Unmarshal(*rawMessage, &jsonContent); err != nil {
+417 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+418 | 	}
+419 | 
+420 | 	result := GetPromptResult{}
+421 | 
+422 | 	meta, ok := jsonContent["_meta"]
+423 | 	if ok {
+424 | 		if metaMap, ok := meta.(map[string]any); ok {
+425 | 			result.Meta = metaMap
+426 | 		}
+427 | 	}
+428 | 
+429 | 	description, ok := jsonContent["description"]
+430 | 	if ok {
+431 | 		if descriptionStr, ok := description.(string); ok {
+432 | 			result.Description = descriptionStr
+433 | 		}
+434 | 	}
+435 | 
+436 | 	messages, ok := jsonContent["messages"]
+437 | 	if ok {
+438 | 		messagesArr, ok := messages.([]any)
+439 | 		if !ok {
+440 | 			return nil, fmt.Errorf("messages is not an array")
+441 | 		}
+442 | 
+443 | 		for _, message := range messagesArr {
+444 | 			messageMap, ok := message.(map[string]any)
+445 | 			if !ok {
+446 | 				return nil, fmt.Errorf("message is not an object")
+447 | 			}
+448 | 
+449 | 			// Extract role
+450 | 			roleStr := ExtractString(messageMap, "role")
+451 | 			if roleStr == "" || (roleStr != string(RoleAssistant) && roleStr != string(RoleUser)) {
+452 | 				return nil, fmt.Errorf("unsupported role: %s", roleStr)
+453 | 			}
+454 | 
+455 | 			// Extract content
+456 | 			contentMap, ok := messageMap["content"].(map[string]any)
+457 | 			if !ok {
+458 | 				return nil, fmt.Errorf("content is not an object")
+459 | 			}
+460 | 
+461 | 			// Process content
+462 | 			content, err := ParseContent(contentMap)
+463 | 			if err != nil {
+464 | 				return nil, err
+465 | 			}
+466 | 
+467 | 			// Append processed message
+468 | 			result.Messages = append(result.Messages, NewPromptMessage(Role(roleStr), content))
+469 | 
+470 | 		}
+471 | 	}
+472 | 
+473 | 	return &result, nil
+474 | }
+475 | 
+476 | func ParseCallToolResult(rawMessage *json.RawMessage) (*CallToolResult, error) {
+477 | 	var jsonContent map[string]any
+478 | 	if err := json.Unmarshal(*rawMessage, &jsonContent); err != nil {
+479 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+480 | 	}
+481 | 
+482 | 	var result CallToolResult
+483 | 
+484 | 	meta, ok := jsonContent["_meta"]
+485 | 	if ok {
+486 | 		if metaMap, ok := meta.(map[string]any); ok {
+487 | 			result.Meta = metaMap
+488 | 		}
+489 | 	}
+490 | 
+491 | 	isError, ok := jsonContent["isError"]
+492 | 	if ok {
+493 | 		if isErrorBool, ok := isError.(bool); ok {
+494 | 			result.IsError = isErrorBool
+495 | 		}
+496 | 	}
+497 | 
+498 | 	contents, ok := jsonContent["content"]
+499 | 	if !ok {
+500 | 		return nil, fmt.Errorf("content is missing")
+501 | 	}
+502 | 
+503 | 	contentArr, ok := contents.([]any)
+504 | 	if !ok {
+505 | 		return nil, fmt.Errorf("content is not an array")
+506 | 	}
+507 | 
+508 | 	for _, content := range contentArr {
+509 | 		// Extract content
+510 | 		contentMap, ok := content.(map[string]any)
+511 | 		if !ok {
+512 | 			return nil, fmt.Errorf("content is not an object")
+513 | 		}
+514 | 
+515 | 		// Process content
+516 | 		content, err := ParseContent(contentMap)
+517 | 		if err != nil {
+518 | 			return nil, err
+519 | 		}
+520 | 
+521 | 		result.Content = append(result.Content, content)
+522 | 	}
+523 | 
+524 | 	return &result, nil
+525 | }
+526 | 
+527 | func ParseResourceContents(contentMap map[string]any) (ResourceContents, error) {
+528 | 	uri := ExtractString(contentMap, "uri")
+529 | 	if uri == "" {
+530 | 		return nil, fmt.Errorf("resource uri is missing")
+531 | 	}
+532 | 
+533 | 	mimeType := ExtractString(contentMap, "mimeType")
+534 | 
+535 | 	if text := ExtractString(contentMap, "text"); text != "" {
+536 | 		return TextResourceContents{
+537 | 			URI:      uri,
+538 | 			MIMEType: mimeType,
+539 | 			Text:     text,
+540 | 		}, nil
+541 | 	}
+542 | 
+543 | 	if blob := ExtractString(contentMap, "blob"); blob != "" {
+544 | 		return BlobResourceContents{
+545 | 			URI:      uri,
+546 | 			MIMEType: mimeType,
+547 | 			Blob:     blob,
+548 | 		}, nil
+549 | 	}
+550 | 
+551 | 	return nil, fmt.Errorf("unsupported resource type")
+552 | }
+553 | 
+554 | func ParseReadResourceResult(rawMessage *json.RawMessage) (*ReadResourceResult, error) {
+555 | 	var jsonContent map[string]any
+556 | 	if err := json.Unmarshal(*rawMessage, &jsonContent); err != nil {
+557 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+558 | 	}
+559 | 
+560 | 	var result ReadResourceResult
+561 | 
+562 | 	meta, ok := jsonContent["_meta"]
+563 | 	if ok {
+564 | 		if metaMap, ok := meta.(map[string]any); ok {
+565 | 			result.Meta = metaMap
+566 | 		}
+567 | 	}
+568 | 
+569 | 	contents, ok := jsonContent["contents"]
+570 | 	if !ok {
+571 | 		return nil, fmt.Errorf("contents is missing")
+572 | 	}
+573 | 
+574 | 	contentArr, ok := contents.([]any)
+575 | 	if !ok {
+576 | 		return nil, fmt.Errorf("contents is not an array")
+577 | 	}
+578 | 
+579 | 	for _, content := range contentArr {
+580 | 		// Extract content
+581 | 		contentMap, ok := content.(map[string]any)
+582 | 		if !ok {
+583 | 			return nil, fmt.Errorf("content is not an object")
+584 | 		}
+585 | 
+586 | 		// Process content
+587 | 		content, err := ParseResourceContents(contentMap)
+588 | 		if err != nil {
+589 | 			return nil, err
+590 | 		}
+591 | 
+592 | 		result.Contents = append(result.Contents, content)
+593 | 	}
+594 | 
+595 | 	return &result, nil
+596 | }
+597 | 
+
+
+--------------------------------------------------------------------------------

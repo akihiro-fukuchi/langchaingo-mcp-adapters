@@ -1,0 +1,1139 @@
+├── README.md
+├── langchain_mcp_adapters
+    ├── __init__.py
+    ├── client.py
+    ├── prompts.py
+    └── tools.py
+└── tests
+    ├── __init__.py
+    ├── servers
+        ├── __init__.py
+        ├── math_server.py
+        └── weather_server.py
+    ├── test_client.py
+    ├── test_import.py
+    ├── test_prompts.py
+    └── test_tools.py
+
+
+/README.md:
+--------------------------------------------------------------------------------
+  1 | # LangChain MCP Adapters
+  2 | 
+  3 | This library provides a lightweight wrapper that makes [Anthropic Model Context Protocol (MCP)](https://modelcontextprotocol.io/introduction) tools compatible with [LangChain](https://github.com/langchain-ai/langchain) and [LangGraph](https://github.com/langchain-ai/langgraph).
+  4 | 
+  5 | ![MCP](static/img/mcp.png)
+  6 | 
+  7 | ## Features
+  8 | 
+  9 | - 🛠️ Convert MCP tools into [LangChain tools](https://python.langchain.com/docs/concepts/tools/) that can be used with [LangGraph](https://github.com/langchain-ai/langgraph) agents
+ 10 | - 📦 A client implementation that allows you to connect to multiple MCP servers and load tools from them
+ 11 | 
+ 12 | ## Installation
+ 13 | 
+ 14 | ```bash
+ 15 | pip install langchain-mcp-adapters
+ 16 | ```
+ 17 | 
+ 18 | ## Quickstart
+ 19 | 
+ 20 | Here is a simple example of using the MCP tools with a LangGraph agent.
+ 21 | 
+ 22 | ```bash
+ 23 | pip install langchain-mcp-adapters langgraph langchain-openai
+ 24 | 
+ 25 | export OPENAI_API_KEY=<your_api_key>
+ 26 | ```
+ 27 | 
+ 28 | ### Server
+ 29 | 
+ 30 | First, let's create an MCP server that can add and multiply numbers.
+ 31 | 
+ 32 | ```python
+ 33 | # math_server.py
+ 34 | from mcp.server.fastmcp import FastMCP
+ 35 | 
+ 36 | mcp = FastMCP("Math")
+ 37 | 
+ 38 | @mcp.tool()
+ 39 | def add(a: int, b: int) -> int:
+ 40 |     """Add two numbers"""
+ 41 |     return a + b
+ 42 | 
+ 43 | @mcp.tool()
+ 44 | def multiply(a: int, b: int) -> int:
+ 45 |     """Multiply two numbers"""
+ 46 |     return a * b
+ 47 | 
+ 48 | if __name__ == "__main__":
+ 49 |     mcp.run(transport="stdio")
+ 50 | ```
+ 51 | 
+ 52 | ### Client
+ 53 | 
+ 54 | ```python
+ 55 | # Create server parameters for stdio connection
+ 56 | from mcp import ClientSession, StdioServerParameters
+ 57 | from mcp.client.stdio import stdio_client
+ 58 | 
+ 59 | from langchain_mcp_adapters.tools import load_mcp_tools
+ 60 | from langgraph.prebuilt import create_react_agent
+ 61 | 
+ 62 | from langchain_openai import ChatOpenAI
+ 63 | model = ChatOpenAI(model="gpt-4o")
+ 64 | 
+ 65 | server_params = StdioServerParameters(
+ 66 |     command="python",
+ 67 |     # Make sure to update to the full absolute path to your math_server.py file
+ 68 |     args=["/path/to/math_server.py"],
+ 69 | )
+ 70 | 
+ 71 | async with stdio_client(server_params) as (read, write):
+ 72 |     async with ClientSession(read, write) as session:
+ 73 |         # Initialize the connection
+ 74 |         await session.initialize()
+ 75 | 
+ 76 |         # Get tools
+ 77 |         tools = await load_mcp_tools(session)
+ 78 | 
+ 79 |         # Create and run the agent
+ 80 |         agent = create_react_agent(model, tools)
+ 81 |         agent_response = await agent.ainvoke({"messages": "what's (3 + 5) x 12?"})
+ 82 | ```
+ 83 | 
+ 84 | ## Multiple MCP Servers
+ 85 | 
+ 86 | The library also allows you to connect to multiple MCP servers and load tools from them:
+ 87 | 
+ 88 | ### Server
+ 89 | 
+ 90 | ```python
+ 91 | # math_server.py
+ 92 | ...
+ 93 | 
+ 94 | # weather_server.py
+ 95 | from typing import List
+ 96 | from mcp.server.fastmcp import FastMCP
+ 97 | 
+ 98 | mcp = FastMCP("Weather")
+ 99 | 
+100 | @mcp.tool()
+101 | async def get_weather(location: str) -> str:
+102 |     """Get weather for location."""
+103 |     return "It's always sunny in New York"
+104 | 
+105 | if __name__ == "__main__":
+106 |     mcp.run(transport="sse")
+107 | ```
+108 | 
+109 | ```bash
+110 | python weather_server.py
+111 | ```
+112 | 
+113 | ### Client
+114 | 
+115 | ```python
+116 | from langchain_mcp_adapters.client import MultiServerMCPClient
+117 | from langgraph.prebuilt import create_react_agent
+118 | 
+119 | from langchain_openai import ChatOpenAI
+120 | model = ChatOpenAI(model="gpt-4o")
+121 | 
+122 | async with MultiServerMCPClient(
+123 |     {
+124 |         "math": {
+125 |             "command": "python",
+126 |             # Make sure to update to the full absolute path to your math_server.py file
+127 |             "args": ["/path/to/math_server.py"],
+128 |             "transport": "stdio",
+129 |         },
+130 |         "weather": {
+131 |             # make sure you start your weather server on port 8000
+132 |             "url": "http://localhost:8000/sse",
+133 |             "transport": "sse",
+134 |         }
+135 |     }
+136 | ) as client:
+137 |     agent = create_react_agent(model, client.get_tools())
+138 |     math_response = await agent.ainvoke({"messages": "what's (3 + 5) x 12?"})
+139 |     weather_response = await agent.ainvoke({"messages": "what is the weather in nyc?"})
+140 | ```
+141 | 
+142 | ## Using with LangGraph API Server
+143 | 
+144 | > [!TIP]
+145 | > Check out [this guide](https://langchain-ai.github.io/langgraph/tutorials/langgraph-platform/local-server/) on getting started with LangGraph API server.
+146 | 
+147 | If you want to run a LangGraph agent that uses MCP tools in a LangGraph API server, you can use the following setup:
+148 | 
+149 | ```python
+150 | # graph.py
+151 | from contextlib import asynccontextmanager
+152 | from langchain_mcp_adapters.client import MultiServerMCPClient
+153 | from langgraph.prebuilt import create_react_agent
+154 | from langchain_anthropic import ChatAnthropic
+155 | 
+156 | model = ChatAnthropic(model="claude-3-5-sonnet-latest")
+157 | 
+158 | @asynccontextmanager
+159 | async def make_graph():
+160 |     async with MultiServerMCPClient(
+161 |         {
+162 |             "math": {
+163 |                 "command": "python",
+164 |                 # Make sure to update to the full absolute path to your math_server.py file
+165 |                 "args": ["/path/to/math_server.py"],
+166 |                 "transport": "stdio",
+167 |             },
+168 |             "weather": {
+169 |                 # make sure you start your weather server on port 8000
+170 |                 "url": "http://localhost:8000/sse",
+171 |                 "transport": "sse",
+172 |             }
+173 |         }
+174 |     ) as client:
+175 |         agent = create_react_agent(model, client.get_tools())
+176 |         yield agent
+177 | ```
+178 | 
+179 | In your [`langgraph.json`](https://langchain-ai.github.io/langgraph/cloud/reference/cli/#configuration-file) make sure to specify `make_graph` as your graph entrypoint:
+180 | 
+181 | ```json
+182 | {
+183 |   "dependencies": ["."],
+184 |   "graphs": {
+185 |     "agent": "./graph.py:make_graph"
+186 |   }
+187 | }
+188 | ```
+189 | 
+
+
+--------------------------------------------------------------------------------
+
+/langchain_mcp_adapters/__init__.py:
+--------------------------------------------------------------------------------
+https://raw.githubusercontent.com/langchain-ai/langchain-mcp-adapters/f0e4d9449274a56b618b877a02039e63ce9d08d0/langchain_mcp_adapters/__init__.py
+
+
+--------------------------------------------------------------------------------
+/langchain_mcp_adapters/client.py:
+--------------------------------------------------------------------------------
+  1 | import os
+  2 | from contextlib import AsyncExitStack
+  3 | from pathlib import Path
+  4 | from types import TracebackType
+  5 | from typing import Any, Literal, Optional, TypedDict, cast
+  6 | 
+  7 | from langchain_core.messages import AIMessage, HumanMessage
+  8 | from langchain_core.tools import BaseTool
+  9 | from mcp import ClientSession, StdioServerParameters
+ 10 | from mcp.client.sse import sse_client
+ 11 | from mcp.client.stdio import stdio_client
+ 12 | 
+ 13 | from langchain_mcp_adapters.prompts import load_mcp_prompt
+ 14 | from langchain_mcp_adapters.tools import load_mcp_tools
+ 15 | 
+ 16 | EncodingErrorHandler = Literal["strict", "ignore", "replace"]
+ 17 | 
+ 18 | DEFAULT_ENCODING = "utf-8"
+ 19 | DEFAULT_ENCODING_ERROR_HANDLER: EncodingErrorHandler = "strict"
+ 20 | 
+ 21 | DEFAULT_HTTP_TIMEOUT = 5
+ 22 | DEFAULT_SSE_READ_TIMEOUT = 60 * 5
+ 23 | 
+ 24 | 
+ 25 | class StdioConnection(TypedDict):
+ 26 |     transport: Literal["stdio"]
+ 27 | 
+ 28 |     command: str
+ 29 |     """The executable to run to start the server."""
+ 30 | 
+ 31 |     args: list[str]
+ 32 |     """Command line arguments to pass to the executable."""
+ 33 | 
+ 34 |     env: dict[str, str] | None
+ 35 |     """The environment to use when spawning the process."""
+ 36 | 
+ 37 |     cwd: str | Path | None
+ 38 |     """The working directory to use when spawning the process."""
+ 39 | 
+ 40 |     encoding: str
+ 41 |     """The text encoding used when sending/receiving messages to the server."""
+ 42 | 
+ 43 |     encoding_error_handler: EncodingErrorHandler
+ 44 |     """
+ 45 |     The text encoding error handler.
+ 46 | 
+ 47 |     See https://docs.python.org/3/library/codecs.html#codec-base-classes for
+ 48 |     explanations of possible values
+ 49 |     """
+ 50 | 
+ 51 |     session_kwargs: dict[str, Any] | None
+ 52 |     """Additional keyword arguments to pass to the ClientSession"""
+ 53 | 
+ 54 | 
+ 55 | class SSEConnection(TypedDict):
+ 56 |     transport: Literal["sse"]
+ 57 | 
+ 58 |     url: str
+ 59 |     """The URL of the SSE endpoint to connect to."""
+ 60 | 
+ 61 |     headers: dict[str, Any] | None
+ 62 |     """HTTP headers to send to the SSE endpoint"""
+ 63 | 
+ 64 |     timeout: float
+ 65 |     """HTTP timeout"""
+ 66 | 
+ 67 |     sse_read_timeout: float
+ 68 |     """SSE read timeout"""
+ 69 | 
+ 70 |     session_kwargs: dict[str, Any] | None
+ 71 |     """Additional keyword arguments to pass to the ClientSession"""
+ 72 | 
+ 73 | 
+ 74 | class MultiServerMCPClient:
+ 75 |     """Client for connecting to multiple MCP servers and loading LangChain-compatible tools from them."""
+ 76 | 
+ 77 |     def __init__(
+ 78 |         self, connections: dict[str, StdioConnection | SSEConnection] | None = None
+ 79 |     ) -> None:
+ 80 |         """Initialize a MultiServerMCPClient with MCP servers connections.
+ 81 | 
+ 82 |         Args:
+ 83 |             connections: A dictionary mapping server names to connection configurations.
+ 84 |                 Each configuration can be either a StdioConnection or SSEConnection.
+ 85 |                 If None, no initial connections are established.
+ 86 | 
+ 87 |         Example:
+ 88 | 
+ 89 |             ```python
+ 90 |             async with MultiServerMCPClient(
+ 91 |                 {
+ 92 |                     "math": {
+ 93 |                         "command": "python",
+ 94 |                         # Make sure to update to the full absolute path to your math_server.py file
+ 95 |                         "args": ["/path/to/math_server.py"],
+ 96 |                         "transport": "stdio",
+ 97 |                     },
+ 98 |                     "weather": {
+ 99 |                         # make sure you start your weather server on port 8000
+100 |                         "url": "http://localhost:8000/sse",
+101 |                         "transport": "sse",
+102 |                     }
+103 |                 }
+104 |             ) as client:
+105 |                 all_tools = client.get_tools()
+106 |                 ...
+107 |             ```
+108 |         """
+109 |         self.connections: dict[str, StdioConnection | SSEConnection] = connections or {}
+110 |         self.exit_stack = AsyncExitStack()
+111 |         self.sessions: dict[str, ClientSession] = {}
+112 |         self.server_name_to_tools: dict[str, list[BaseTool]] = {}
+113 | 
+114 |     async def _initialize_session_and_load_tools(
+115 |         self, server_name: str, session: ClientSession
+116 |     ) -> None:
+117 |         """Initialize a session and load tools from it.
+118 | 
+119 |         Args:
+120 |             server_name: Name to identify this server connection
+121 |             session: The ClientSession to initialize
+122 |         """
+123 |         # Initialize the session
+124 |         await session.initialize()
+125 |         self.sessions[server_name] = session
+126 | 
+127 |         # Load tools from this server
+128 |         server_tools = await load_mcp_tools(session)
+129 |         self.server_name_to_tools[server_name] = server_tools
+130 | 
+131 |     async def connect_to_server(
+132 |         self,
+133 |         server_name: str,
+134 |         *,
+135 |         transport: Literal["stdio", "sse"] = "stdio",
+136 |         **kwargs,
+137 |     ) -> None:
+138 |         """Connect to an MCP server using either stdio or SSE.
+139 | 
+140 |         This is a generic method that calls either connect_to_server_via_stdio or connect_to_server_via_sse
+141 |         based on the provided transport parameter.
+142 | 
+143 |         Args:
+144 |             server_name: Name to identify this server connection
+145 |             transport: Type of transport to use ("stdio" or "sse"), defaults to "stdio"
+146 |             **kwargs: Additional arguments to pass to the specific connection method
+147 | 
+148 |         Raises:
+149 |             ValueError: If transport is not recognized
+150 |             ValueError: If required parameters for the specified transport are missing
+151 |         """
+152 |         if transport == "sse":
+153 |             if "url" not in kwargs:
+154 |                 raise ValueError("'url' parameter is required for SSE connection")
+155 |             await self.connect_to_server_via_sse(
+156 |                 server_name,
+157 |                 url=kwargs["url"],
+158 |                 headers=kwargs.get("headers"),
+159 |                 timeout=kwargs.get("timeout", DEFAULT_HTTP_TIMEOUT),
+160 |                 sse_read_timeout=kwargs.get("sse_read_timeout", DEFAULT_SSE_READ_TIMEOUT),
+161 |                 session_kwargs=kwargs.get("session_kwargs"),
+162 |             )
+163 |         elif transport == "stdio":
+164 |             if "command" not in kwargs:
+165 |                 raise ValueError("'command' parameter is required for stdio connection")
+166 |             if "args" not in kwargs:
+167 |                 raise ValueError("'args' parameter is required for stdio connection")
+168 |             await self.connect_to_server_via_stdio(
+169 |                 server_name,
+170 |                 command=kwargs["command"],
+171 |                 args=kwargs["args"],
+172 |                 env=kwargs.get("env"),
+173 |                 encoding=kwargs.get("encoding", DEFAULT_ENCODING),
+174 |                 encoding_error_handler=kwargs.get(
+175 |                     "encoding_error_handler", DEFAULT_ENCODING_ERROR_HANDLER
+176 |                 ),
+177 |                 session_kwargs=kwargs.get("session_kwargs"),
+178 |             )
+179 |         else:
+180 |             raise ValueError(f"Unsupported transport: {transport}. Must be 'stdio' or 'sse'")
+181 | 
+182 |     async def connect_to_server_via_stdio(
+183 |         self,
+184 |         server_name: str,
+185 |         *,
+186 |         command: str,
+187 |         args: list[str],
+188 |         env: dict[str, str] | None = None,
+189 |         encoding: str = DEFAULT_ENCODING,
+190 |         encoding_error_handler: Literal[
+191 |             "strict", "ignore", "replace"
+192 |         ] = DEFAULT_ENCODING_ERROR_HANDLER,
+193 |         session_kwargs: dict[str, Any] | None = None,
+194 |     ) -> None:
+195 |         """Connect to a specific MCP server using stdio
+196 | 
+197 |         Args:
+198 |             server_name: Name to identify this server connection
+199 |             command: Command to execute
+200 |             args: Arguments for the command
+201 |             env: Environment variables for the command
+202 |             encoding: Character encoding
+203 |             encoding_error_handler: How to handle encoding errors
+204 |             session_kwargs: Additional keyword arguments to pass to the ClientSession
+205 |         """
+206 |         # NOTE: execution commands (e.g., `uvx` / `npx`) require PATH envvar to be set.
+207 |         # To address this, we automatically inject existing PATH envvar into the `env` value,
+208 |         # if it's not already set.
+209 |         env = env or {}
+210 |         if "PATH" not in env:
+211 |             env["PATH"] = os.environ.get("PATH", "")
+212 | 
+213 |         server_params = StdioServerParameters(
+214 |             command=command,
+215 |             args=args,
+216 |             env=env,
+217 |             encoding=encoding,
+218 |             encoding_error_handler=encoding_error_handler,
+219 |         )
+220 | 
+221 |         # Create and store the connection
+222 |         stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
+223 |         read, write = stdio_transport
+224 |         session_kwargs = session_kwargs or {}
+225 |         session = cast(
+226 |             ClientSession,
+227 |             await self.exit_stack.enter_async_context(ClientSession(read, write, **session_kwargs)),
+228 |         )
+229 | 
+230 |         await self._initialize_session_and_load_tools(server_name, session)
+231 | 
+232 |     async def connect_to_server_via_sse(
+233 |         self,
+234 |         server_name: str,
+235 |         *,
+236 |         url: str,
+237 |         headers: dict[str, Any] | None = None,
+238 |         timeout: float = DEFAULT_HTTP_TIMEOUT,
+239 |         sse_read_timeout: float = DEFAULT_SSE_READ_TIMEOUT,
+240 |         session_kwargs: dict[str, Any] | None = None,
+241 |     ) -> None:
+242 |         """Connect to a specific MCP server using SSE
+243 | 
+244 |         Args:
+245 |             server_name: Name to identify this server connection
+246 |             url: URL of the SSE server
+247 |             headers: HTTP headers to send to the SSE endpoint
+248 |             timeout: HTTP timeout
+249 |             sse_read_timeout: SSE read timeout
+250 |             session_kwargs: Additional keyword arguments to pass to the ClientSession
+251 |         """
+252 |         # Create and store the connection
+253 |         sse_transport = await self.exit_stack.enter_async_context(
+254 |             sse_client(url, headers, timeout, sse_read_timeout)
+255 |         )
+256 |         read, write = sse_transport
+257 |         session_kwargs = session_kwargs or {}
+258 |         session = cast(
+259 |             ClientSession,
+260 |             await self.exit_stack.enter_async_context(ClientSession(read, write, **session_kwargs)),
+261 |         )
+262 | 
+263 |         await self._initialize_session_and_load_tools(server_name, session)
+264 | 
+265 |     def get_tools(self) -> list[BaseTool]:
+266 |         """Get a list of all tools from all connected servers."""
+267 |         all_tools: list[BaseTool] = []
+268 |         for server_tools in self.server_name_to_tools.values():
+269 |             all_tools.extend(server_tools)
+270 |         return all_tools
+271 | 
+272 |     async def get_prompt(
+273 |         self, server_name: str, prompt_name: str, arguments: Optional[dict[str, Any]]
+274 |     ) -> list[HumanMessage | AIMessage]:
+275 |         """Get a prompt from a given MCP server."""
+276 |         session = self.sessions[server_name]
+277 |         return await load_mcp_prompt(session, prompt_name, arguments)
+278 | 
+279 |     async def __aenter__(self) -> "MultiServerMCPClient":
+280 |         try:
+281 |             connections = self.connections or {}
+282 |             for server_name, connection in connections.items():
+283 |                 await self.connect_to_server(server_name, **connection)
+284 | 
+285 |             return self
+286 |         except Exception:
+287 |             await self.exit_stack.aclose()
+288 |             raise
+289 | 
+290 |     async def __aexit__(
+291 |         self,
+292 |         exc_type: type[BaseException] | None,
+293 |         exc_val: BaseException | None,
+294 |         exc_tb: TracebackType | None,
+295 |     ) -> None:
+296 |         await self.exit_stack.aclose()
+297 | 
+
+
+--------------------------------------------------------------------------------
+/langchain_mcp_adapters/prompts.py:
+--------------------------------------------------------------------------------
+ 1 | from typing import Any, Optional
+ 2 | 
+ 3 | from langchain_core.messages import AIMessage, HumanMessage
+ 4 | from mcp import ClientSession
+ 5 | from mcp.types import PromptMessage
+ 6 | 
+ 7 | 
+ 8 | def convert_mcp_prompt_message_to_langchain_message(
+ 9 |     message: PromptMessage,
+10 | ) -> HumanMessage | AIMessage:
+11 |     """Convert an MCP prompt message to a LangChain message.
+12 | 
+13 |     Args:
+14 |         message: MCP prompt message to convert
+15 | 
+16 |     Returns:
+17 |         a LangChain message
+18 |     """
+19 |     if message.content.type == "text":
+20 |         if message.role == "user":
+21 |             return HumanMessage(content=message.content.text)
+22 |         elif message.role == "assistant":
+23 |             return AIMessage(content=message.content.text)
+24 |         else:
+25 |             raise ValueError(f"Unsupported prompt message role: {message.role}")
+26 | 
+27 |     raise ValueError(f"Unsupported prompt message content type: {message.content.type}")
+28 | 
+29 | 
+30 | async def load_mcp_prompt(
+31 |     session: ClientSession, name: str, arguments: Optional[dict[str, Any]] = None
+32 | ) -> list[HumanMessage | AIMessage]:
+33 |     """Load MCP prompt and convert to LangChain messages."""
+34 |     response = await session.get_prompt(name, arguments)
+35 |     return [
+36 |         convert_mcp_prompt_message_to_langchain_message(message) for message in response.messages
+37 |     ]
+38 | 
+
+
+--------------------------------------------------------------------------------
+/langchain_mcp_adapters/tools.py:
+--------------------------------------------------------------------------------
+ 1 | from typing import Any
+ 2 | 
+ 3 | from langchain_core.tools import BaseTool, StructuredTool, ToolException
+ 4 | from mcp import ClientSession
+ 5 | from mcp.types import (
+ 6 |     CallToolResult,
+ 7 |     EmbeddedResource,
+ 8 |     ImageContent,
+ 9 |     TextContent,
+10 | )
+11 | from mcp.types import (
+12 |     Tool as MCPTool,
+13 | )
+14 | 
+15 | NonTextContent = ImageContent | EmbeddedResource
+16 | 
+17 | 
+18 | def _convert_call_tool_result(
+19 |     call_tool_result: CallToolResult,
+20 | ) -> tuple[str | list[str], list[NonTextContent] | None]:
+21 |     text_contents: list[TextContent] = []
+22 |     non_text_contents = []
+23 |     for content in call_tool_result.content:
+24 |         if isinstance(content, TextContent):
+25 |             text_contents.append(content)
+26 |         else:
+27 |             non_text_contents.append(content)
+28 | 
+29 |     tool_content: str | list[str] = [content.text for content in text_contents]
+30 |     if len(text_contents) == 1:
+31 |         tool_content = tool_content[0]
+32 | 
+33 |     if call_tool_result.isError:
+34 |         raise ToolException(tool_content)
+35 | 
+36 |     return tool_content, non_text_contents or None
+37 | 
+38 | 
+39 | def convert_mcp_tool_to_langchain_tool(
+40 |     session: ClientSession,
+41 |     tool: MCPTool,
+42 | ) -> BaseTool:
+43 |     """Convert an MCP tool to a LangChain tool.
+44 | 
+45 |     NOTE: this tool can be executed only in a context of an active MCP client session.
+46 | 
+47 |     Args:
+48 |         session: MCP client session
+49 |         tool: MCP tool to convert
+50 | 
+51 |     Returns:
+52 |         a LangChain tool
+53 |     """
+54 | 
+55 |     async def call_tool(
+56 |         **arguments: dict[str, Any],
+57 |     ) -> tuple[str | list[str], list[NonTextContent] | None]:
+58 |         call_tool_result = await session.call_tool(tool.name, arguments)
+59 |         return _convert_call_tool_result(call_tool_result)
+60 | 
+61 |     return StructuredTool(
+62 |         name=tool.name,
+63 |         description=tool.description or "",
+64 |         args_schema=tool.inputSchema,
+65 |         coroutine=call_tool,
+66 |         response_format="content_and_artifact",
+67 |     )
+68 | 
+69 | 
+70 | async def load_mcp_tools(session: ClientSession) -> list[BaseTool]:
+71 |     """Load all available MCP tools and convert them to LangChain tools."""
+72 |     tools = await session.list_tools()
+73 |     return [convert_mcp_tool_to_langchain_tool(session, tool) for tool in tools.tools]
+74 | 
+
+
+--------------------------------------------------------------------------------
+/tests/__init__.py:
+--------------------------------------------------------------------------------
+https://raw.githubusercontent.com/langchain-ai/langchain-mcp-adapters/f0e4d9449274a56b618b877a02039e63ce9d08d0/tests/__init__.py
+
+
+--------------------------------------------------------------------------------
+/tests/servers/__init__.py:
+--------------------------------------------------------------------------------
+https://raw.githubusercontent.com/langchain-ai/langchain-mcp-adapters/f0e4d9449274a56b618b877a02039e63ce9d08d0/tests/servers/__init__.py
+
+
+--------------------------------------------------------------------------------
+/tests/servers/math_server.py:
+--------------------------------------------------------------------------------
+ 1 | from mcp.server.fastmcp import FastMCP
+ 2 | 
+ 3 | mcp = FastMCP("Math")
+ 4 | 
+ 5 | 
+ 6 | @mcp.tool()
+ 7 | def add(a: int, b: int) -> int:
+ 8 |     """Add two numbers"""
+ 9 |     return a + b
+10 | 
+11 | 
+12 | @mcp.tool()
+13 | def multiply(a: int, b: int) -> int:
+14 |     """Multiply two numbers"""
+15 |     return a * b
+16 | 
+17 | 
+18 | @mcp.prompt()
+19 | def configure_assistant(skills: str) -> str:
+20 |     return [
+21 |         {
+22 |             "role": "assistant",
+23 |             "content": f"You are a helpful assistant. You have the following skills: {skills}. Always use only one tool at a time.",
+24 |         }
+25 |     ]
+26 | 
+27 | 
+28 | if __name__ == "__main__":
+29 |     mcp.run(transport="stdio")
+30 | 
+
+
+--------------------------------------------------------------------------------
+/tests/servers/weather_server.py:
+--------------------------------------------------------------------------------
+ 1 | from mcp.server.fastmcp import FastMCP
+ 2 | 
+ 3 | mcp = FastMCP("Weather")
+ 4 | 
+ 5 | 
+ 6 | @mcp.tool()
+ 7 | async def get_weather(location: str) -> str:
+ 8 |     """Get weather for location."""
+ 9 |     return f"It's always sunny in {location}"
+10 | 
+11 | 
+12 | if __name__ == "__main__":
+13 |     mcp.run(transport="stdio")
+14 | 
+
+
+--------------------------------------------------------------------------------
+/tests/test_client.py:
+--------------------------------------------------------------------------------
+  1 | import os
+  2 | from pathlib import Path
+  3 | 
+  4 | import pytest
+  5 | from langchain_core.messages import AIMessage
+  6 | from langchain_core.tools import BaseTool
+  7 | 
+  8 | from langchain_mcp_adapters.client import MultiServerMCPClient
+  9 | 
+ 10 | 
+ 11 | @pytest.mark.asyncio
+ 12 | async def test_multi_server_mcp_client():
+ 13 |     """Test that the MultiServerMCPClient can connect to multiple servers and load tools."""
+ 14 | 
+ 15 |     # Get the absolute path to the server scripts
+ 16 |     current_dir = Path(__file__).parent
+ 17 |     math_server_path = os.path.join(current_dir, "servers/math_server.py")
+ 18 |     weather_server_path = os.path.join(current_dir, "servers/weather_server.py")
+ 19 | 
+ 20 |     async with MultiServerMCPClient(
+ 21 |         {
+ 22 |             "math": {
+ 23 |                 "command": "python",
+ 24 |                 "args": [math_server_path],
+ 25 |                 "transport": "stdio",
+ 26 |             },
+ 27 |             "weather": {
+ 28 |                 "command": "python",
+ 29 |                 "args": [weather_server_path],
+ 30 |                 "transport": "stdio",
+ 31 |             },
+ 32 |         }
+ 33 |     ) as client:
+ 34 |         # Check that we have tools from both servers
+ 35 |         all_tools = client.get_tools()
+ 36 | 
+ 37 |         # Should have 3 tools (add, multiply, get_weather)
+ 38 |         assert len(all_tools) == 3
+ 39 | 
+ 40 |         # Check that tools are BaseTool instances
+ 41 |         for tool in all_tools:
+ 42 |             assert isinstance(tool, BaseTool)
+ 43 | 
+ 44 |         # Verify tool names
+ 45 |         tool_names = {tool.name for tool in all_tools}
+ 46 |         assert tool_names == {"add", "multiply", "get_weather"}
+ 47 | 
+ 48 |         # Check math server tools
+ 49 |         math_tools = client.server_name_to_tools["math"]
+ 50 |         assert len(math_tools) == 2
+ 51 |         math_tool_names = {tool.name for tool in math_tools}
+ 52 |         assert math_tool_names == {"add", "multiply"}
+ 53 | 
+ 54 |         # Check weather server tools
+ 55 |         weather_tools = client.server_name_to_tools["weather"]
+ 56 |         assert len(weather_tools) == 1
+ 57 |         assert weather_tools[0].name == "get_weather"
+ 58 | 
+ 59 |         # Test that we can call a math tool
+ 60 |         add_tool = next(tool for tool in all_tools if tool.name == "add")
+ 61 |         result = await add_tool.ainvoke({"a": 2, "b": 3})
+ 62 |         assert result == "5"
+ 63 | 
+ 64 |         # Test that we can call a weather tool
+ 65 |         weather_tool = next(tool for tool in all_tools if tool.name == "get_weather")
+ 66 |         result = await weather_tool.ainvoke({"location": "London"})
+ 67 |         assert result == "It's always sunny in London"
+ 68 | 
+ 69 |         # Test the multiply tool
+ 70 |         multiply_tool = next(tool for tool in all_tools if tool.name == "multiply")
+ 71 |         result = await multiply_tool.ainvoke({"a": 4, "b": 5})
+ 72 |         assert result == "20"
+ 73 | 
+ 74 | 
+ 75 | @pytest.mark.asyncio
+ 76 | async def test_multi_server_connect_methods():
+ 77 |     """Test the different connect methods for MultiServerMCPClient."""
+ 78 | 
+ 79 |     # Get the absolute path to the server scripts
+ 80 |     current_dir = Path(__file__).parent
+ 81 |     math_server_path = os.path.join(current_dir, "servers/math_server.py")
+ 82 |     weather_server_path = os.path.join(current_dir, "servers/weather_server.py")
+ 83 | 
+ 84 |     # Initialize client without initial connections
+ 85 |     client = MultiServerMCPClient()
+ 86 |     async with client:
+ 87 |         # Connect to math server using connect_to_server
+ 88 |         await client.connect_to_server(
+ 89 |             "math", transport="stdio", command="python", args=[math_server_path]
+ 90 |         )
+ 91 | 
+ 92 |         # Connect to weather server using connect_to_server_via_stdio
+ 93 |         await client.connect_to_server_via_stdio(
+ 94 |             "weather", command="python", args=[weather_server_path]
+ 95 |         )
+ 96 | 
+ 97 |         # Check that we have tools from both servers
+ 98 |         all_tools = client.get_tools()
+ 99 |         assert len(all_tools) == 3
+100 | 
+101 |         # Verify tool names
+102 |         tool_names = {tool.name for tool in all_tools}
+103 |         assert tool_names == {"add", "multiply", "get_weather"}
+104 | 
+105 | 
+106 | @pytest.mark.asyncio
+107 | async def test_get_prompt():
+108 |     """Test retrieving prompts from MCP servers."""
+109 | 
+110 |     # Get the absolute path to the server scripts
+111 |     current_dir = Path(__file__).parent
+112 |     math_server_path = os.path.join(current_dir, "servers/math_server.py")
+113 | 
+114 |     async with MultiServerMCPClient(
+115 |         {
+116 |             "math": {
+117 |                 "command": "python",
+118 |                 "args": [math_server_path],
+119 |                 "transport": "stdio",
+120 |             }
+121 |         }
+122 |     ) as client:
+123 |         # Test getting a prompt from the math server
+124 |         messages = await client.get_prompt(
+125 |             "math", "configure_assistant", {"skills": "math, addition, multiplication"}
+126 |         )
+127 | 
+128 |         # Check that we got an AIMessage back
+129 |         assert len(messages) == 1
+130 |         assert isinstance(messages[0], AIMessage)
+131 |         assert "You are a helpful assistant" in messages[0].content
+132 |         assert "math, addition, multiplication" in messages[0].content
+133 | 
+
+
+--------------------------------------------------------------------------------
+/tests/test_import.py:
+--------------------------------------------------------------------------------
+1 | def test_import() -> None:
+2 |     """Test that the code can be imported"""
+3 |     from langchain_mcp_adapters import client, prompts, tools  # noqa: F401
+4 | 
+
+
+--------------------------------------------------------------------------------
+/tests/test_prompts.py:
+--------------------------------------------------------------------------------
+ 1 | from unittest.mock import AsyncMock
+ 2 | 
+ 3 | import pytest
+ 4 | from langchain_core.messages import AIMessage, HumanMessage
+ 5 | from mcp.types import (
+ 6 |     EmbeddedResource,
+ 7 |     ImageContent,
+ 8 |     PromptMessage,
+ 9 |     TextContent,
+10 |     TextResourceContents,
+11 | )
+12 | 
+13 | from langchain_mcp_adapters.prompts import (
+14 |     convert_mcp_prompt_message_to_langchain_message,
+15 |     load_mcp_prompt,
+16 | )
+17 | 
+18 | 
+19 | @pytest.mark.parametrize(
+20 |     "role,text,expected_cls",
+21 |     [
+22 |         ("assistant", "Hello", AIMessage),
+23 |         ("user", "Hello", HumanMessage),
+24 |     ],
+25 | )
+26 | def test_convert_mcp_prompt_message_to_langchain_message_with_text_content(
+27 |     role: str, text: str, expected_cls: type
+28 | ):
+29 |     message = PromptMessage(role=role, content=TextContent(type="text", text=text))
+30 |     result = convert_mcp_prompt_message_to_langchain_message(message)
+31 |     assert isinstance(result, expected_cls)
+32 |     assert result.content == text
+33 | 
+34 | 
+35 | @pytest.mark.parametrize("role", ["assistant", "user"])
+36 | def test_convert_mcp_prompt_message_to_langchain_message_with_resource_content(role: str):
+37 |     message = PromptMessage(
+38 |         role=role,
+39 |         content=EmbeddedResource(
+40 |             type="resource",
+41 |             resource=TextResourceContents(
+42 |                 uri="message://greeting", mimeType="text/plain", text="hi"
+43 |             ),
+44 |         ),
+45 |     )
+46 |     with pytest.raises(ValueError):
+47 |         convert_mcp_prompt_message_to_langchain_message(message)
+48 | 
+49 | 
+50 | @pytest.mark.parametrize("role", ["assistant", "user"])
+51 | def test_convert_mcp_prompt_message_to_langchain_message_with_image_content(role: str):
+52 |     message = PromptMessage(
+53 |         role=role, content=ImageContent(type="image", mimeType="image/png", data="base64data")
+54 |     )
+55 |     with pytest.raises(ValueError):
+56 |         convert_mcp_prompt_message_to_langchain_message(message)
+57 | 
+58 | 
+59 | @pytest.mark.asyncio
+60 | async def test_load_mcp_prompt():
+61 |     session = AsyncMock()
+62 |     session.get_prompt = AsyncMock(
+63 |         return_value=AsyncMock(
+64 |             messages=[
+65 |                 PromptMessage(role="user", content=TextContent(type="text", text="Hello")),
+66 |                 PromptMessage(role="assistant", content=TextContent(type="text", text="Hi")),
+67 |             ]
+68 |         )
+69 |     )
+70 |     result = await load_mcp_prompt(session, "test_prompt")
+71 |     assert len(result) == 2
+72 |     assert isinstance(result[0], HumanMessage)
+73 |     assert result[0].content == "Hello"
+74 |     assert isinstance(result[1], AIMessage)
+75 |     assert result[1].content == "Hi"
+76 | 
+
+
+--------------------------------------------------------------------------------
+/tests/test_tools.py:
+--------------------------------------------------------------------------------
+  1 | from unittest.mock import AsyncMock, MagicMock
+  2 | 
+  3 | import pytest
+  4 | from langchain_core.messages import ToolMessage
+  5 | from langchain_core.tools import BaseTool, ToolException
+  6 | from mcp.types import (
+  7 |     CallToolResult,
+  8 |     EmbeddedResource,
+  9 |     ImageContent,
+ 10 |     TextContent,
+ 11 |     TextResourceContents,
+ 12 | )
+ 13 | from mcp.types import Tool as MCPTool
+ 14 | 
+ 15 | from langchain_mcp_adapters.tools import (
+ 16 |     _convert_call_tool_result,
+ 17 |     convert_mcp_tool_to_langchain_tool,
+ 18 |     load_mcp_tools,
+ 19 | )
+ 20 | 
+ 21 | 
+ 22 | def test_convert_single_text_content():
+ 23 |     # Test with a single text content
+ 24 |     result = CallToolResult(
+ 25 |         content=[TextContent(type="text", text="test result")],
+ 26 |         isError=False,
+ 27 |     )
+ 28 | 
+ 29 |     text_content, non_text_content = _convert_call_tool_result(result)
+ 30 | 
+ 31 |     assert text_content == "test result"
+ 32 |     assert non_text_content is None
+ 33 | 
+ 34 | 
+ 35 | def test_convert_multiple_text_contents():
+ 36 |     # Test with multiple text contents
+ 37 |     result = CallToolResult(
+ 38 |         content=[
+ 39 |             TextContent(type="text", text="result 1"),
+ 40 |             TextContent(type="text", text="result 2"),
+ 41 |         ],
+ 42 |         isError=False,
+ 43 |     )
+ 44 | 
+ 45 |     text_content, non_text_content = _convert_call_tool_result(result)
+ 46 | 
+ 47 |     assert text_content == ["result 1", "result 2"]
+ 48 |     assert non_text_content is None
+ 49 | 
+ 50 | 
+ 51 | def test_convert_with_non_text_content():
+ 52 |     # Test with non-text content
+ 53 |     image_content = ImageContent(type="image", mimeType="image/png", data="base64data")
+ 54 |     resource_content = EmbeddedResource(
+ 55 |         type="resource",
+ 56 |         resource=TextResourceContents(uri="resource://test", mimeType="text/plain", text="hi"),
+ 57 |     )
+ 58 | 
+ 59 |     result = CallToolResult(
+ 60 |         content=[
+ 61 |             TextContent(type="text", text="text result"),
+ 62 |             image_content,
+ 63 |             resource_content,
+ 64 |         ],
+ 65 |         isError=False,
+ 66 |     )
+ 67 | 
+ 68 |     text_content, non_text_content = _convert_call_tool_result(result)
+ 69 | 
+ 70 |     assert text_content == "text result"
+ 71 |     assert non_text_content == [image_content, resource_content]
+ 72 | 
+ 73 | 
+ 74 | def test_convert_with_error():
+ 75 |     # Test with error
+ 76 |     result = CallToolResult(
+ 77 |         content=[TextContent(type="text", text="error message")],
+ 78 |         isError=True,
+ 79 |     )
+ 80 | 
+ 81 |     with pytest.raises(ToolException) as exc_info:
+ 82 |         _convert_call_tool_result(result)
+ 83 | 
+ 84 |     assert str(exc_info.value) == "error message"
+ 85 | 
+ 86 | 
+ 87 | @pytest.mark.asyncio
+ 88 | async def test_convert_mcp_tool_to_langchain_tool():
+ 89 |     tool_input_schema = {
+ 90 |         "properties": {
+ 91 |             "param1": {"title": "Param1", "type": "string"},
+ 92 |             "param2": {"title": "Param2", "type": "integer"},
+ 93 |         },
+ 94 |         "required": ["param1", "param2"],
+ 95 |         "title": "ToolSchema",
+ 96 |         "type": "object",
+ 97 |     }
+ 98 |     # Mock session and MCP tool
+ 99 |     session = AsyncMock()
+100 |     session.call_tool.return_value = CallToolResult(
+101 |         content=[TextContent(type="text", text="tool result")],
+102 |         isError=False,
+103 |     )
+104 | 
+105 |     mcp_tool = MCPTool(
+106 |         name="test_tool",
+107 |         description="Test tool description",
+108 |         inputSchema=tool_input_schema,
+109 |     )
+110 | 
+111 |     # Convert MCP tool to LangChain tool
+112 |     lc_tool = convert_mcp_tool_to_langchain_tool(session, mcp_tool)
+113 | 
+114 |     # Verify the converted tool
+115 |     assert lc_tool.name == "test_tool"
+116 |     assert lc_tool.description == "Test tool description"
+117 |     assert lc_tool.args_schema == tool_input_schema
+118 | 
+119 |     # Test calling the tool
+120 |     result = await lc_tool.ainvoke(
+121 |         {"args": {"param1": "test", "param2": 42}, "id": "1", "type": "tool_call"}
+122 |     )
+123 | 
+124 |     # Verify session.call_tool was called with correct arguments
+125 |     session.call_tool.assert_called_once_with("test_tool", {"param1": "test", "param2": 42})
+126 | 
+127 |     # Verify result
+128 |     assert result == ToolMessage(content="tool result", name="test_tool", tool_call_id="1")
+129 | 
+130 | 
+131 | @pytest.mark.asyncio
+132 | async def test_load_mcp_tools():
+133 |     tool_input_schema = {
+134 |         "properties": {
+135 |             "param1": {"title": "Param1", "type": "string"},
+136 |             "param2": {"title": "Param2", "type": "integer"},
+137 |         },
+138 |         "required": ["param1", "param2"],
+139 |         "title": "ToolSchema",
+140 |         "type": "object",
+141 |     }
+142 |     # Mock session and list_tools response
+143 |     session = AsyncMock()
+144 |     mcp_tools = [
+145 |         MCPTool(
+146 |             name="tool1",
+147 |             description="Tool 1 description",
+148 |             inputSchema=tool_input_schema,
+149 |         ),
+150 |         MCPTool(
+151 |             name="tool2",
+152 |             description="Tool 2 description",
+153 |             inputSchema=tool_input_schema,
+154 |         ),
+155 |     ]
+156 |     session.list_tools.return_value = MagicMock(tools=mcp_tools)
+157 | 
+158 |     # Mock call_tool to return different results for different tools
+159 |     async def mock_call_tool(tool_name, arguments):
+160 |         if tool_name == "tool1":
+161 |             return CallToolResult(
+162 |                 content=[TextContent(type="text", text=f"tool1 result with {arguments}")],
+163 |                 isError=False,
+164 |             )
+165 |         else:
+166 |             return CallToolResult(
+167 |                 content=[TextContent(type="text", text=f"tool2 result with {arguments}")],
+168 |                 isError=False,
+169 |             )
+170 | 
+171 |     session.call_tool.side_effect = mock_call_tool
+172 | 
+173 |     # Load MCP tools
+174 |     tools = await load_mcp_tools(session)
+175 | 
+176 |     # Verify the tools
+177 |     assert len(tools) == 2
+178 |     assert all(isinstance(tool, BaseTool) for tool in tools)
+179 |     assert tools[0].name == "tool1"
+180 |     assert tools[1].name == "tool2"
+181 | 
+182 |     # Test calling the first tool
+183 |     result1 = await tools[0].ainvoke(
+184 |         {"args": {"param1": "test1", "param2": 1}, "id": "1", "type": "tool_call"}
+185 |     )
+186 |     assert result1 == ToolMessage(
+187 |         content="tool1 result with {'param1': 'test1', 'param2': 1}", name="tool1", tool_call_id="1"
+188 |     )
+189 | 
+190 |     # Test calling the second tool
+191 |     result2 = await tools[1].ainvoke(
+192 |         {"args": {"param1": "test2", "param2": 2}, "id": "2", "type": "tool_call"}
+193 |     )
+194 |     assert result2 == ToolMessage(
+195 |         content="tool2 result with {'param1': 'test2', 'param2': 2}", name="tool2", tool_call_id="2"
+196 |     )
+197 | 
+
+
+--------------------------------------------------------------------------------
