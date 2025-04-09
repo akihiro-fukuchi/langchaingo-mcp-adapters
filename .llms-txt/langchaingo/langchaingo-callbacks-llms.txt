@@ -1,0 +1,562 @@
+└── callbacks
+    ├── agent_final_stream.go
+    ├── agent_final_stream_test.go
+    ├── callbacks.go
+    ├── combining.go
+    ├── doc.go
+    ├── log.go
+    ├── log_stream.go
+    └── simple.go
+
+
+/callbacks/agent_final_stream.go:
+--------------------------------------------------------------------------------
+  1 | package callbacks
+  2 | 
+  3 | import (
+  4 | 	"context"
+  5 | 	"strings"
+  6 | )
+  7 | 
+  8 | // DefaultKeywords is map of the agents final out prefix keywords.
+  9 | //
+ 10 | //nolint:all
+ 11 | var DefaultKeywords = []string{"Final Answer:", "Final:", "AI:"}
+ 12 | 
+ 13 | type AgentFinalStreamHandler struct {
+ 14 | 	SimpleHandler
+ 15 | 	egress          chan []byte
+ 16 | 	Keywords        []string
+ 17 | 	LastTokens      string
+ 18 | 	KeywordDetected bool
+ 19 | 	PrintOutput     bool
+ 20 | }
+ 21 | 
+ 22 | var _ Handler = &AgentFinalStreamHandler{}
+ 23 | 
+ 24 | // NewFinalStreamHandler creates a new instance of the AgentFinalStreamHandler struct.
+ 25 | //
+ 26 | // It accepts a variadic number of strings as keywords. If any keywords are provided,
+ 27 | // the DefaultKeywords variable is updated with the provided keywords.
+ 28 | //
+ 29 | // DefaultKeywords is map of the agents final out prefix keywords.
+ 30 | //
+ 31 | // The function returns a pointer to the created AgentFinalStreamHandler struct.
+ 32 | func NewFinalStreamHandler(keywords ...string) *AgentFinalStreamHandler {
+ 33 | 	if len(keywords) > 0 {
+ 34 | 		DefaultKeywords = keywords
+ 35 | 	}
+ 36 | 
+ 37 | 	return &AgentFinalStreamHandler{
+ 38 | 		egress:   make(chan []byte),
+ 39 | 		Keywords: DefaultKeywords,
+ 40 | 	}
+ 41 | }
+ 42 | 
+ 43 | // GetEgress returns the egress channel of the AgentFinalStreamHandler.
+ 44 | //
+ 45 | // It does not take any parameters.
+ 46 | // It returns a channel of type []byte.
+ 47 | func (handler *AgentFinalStreamHandler) GetEgress() chan []byte {
+ 48 | 	return handler.egress
+ 49 | }
+ 50 | 
+ 51 | // ReadFromEgress reads data from the egress channel and invokes the provided
+ 52 | // callback function with each chunk of data.
+ 53 | //
+ 54 | // The callback function receives two parameters:
+ 55 | // - ctx: the context.Context object for the egress operation.
+ 56 | // - chunk: a byte slice representing a chunk of data from the egress channel.
+ 57 | func (handler *AgentFinalStreamHandler) ReadFromEgress(
+ 58 | 	ctx context.Context,
+ 59 | 	callback func(ctx context.Context, chunk []byte),
+ 60 | ) {
+ 61 | 	go func() {
+ 62 | 		defer close(handler.egress)
+ 63 | 		for data := range handler.egress {
+ 64 | 			callback(ctx, data)
+ 65 | 		}
+ 66 | 	}()
+ 67 | }
+ 68 | 
+ 69 | // HandleStreamingFunc implements the callback interface that handles the streaming
+ 70 | // of data in the AgentFinalStreamHandler. The handler reads the incoming data and checks for the
+ 71 | // agents final output keywords, ie, `Final Answer:`, `Final:`, `AI:`. Upon detection of
+ 72 | // the keyword, it starst to stream the agents final output to the egress channel.
+ 73 | //
+ 74 | // It takes in the context and a chunk of bytes as parameters.
+ 75 | // There is no return type for this function.
+ 76 | func (handler *AgentFinalStreamHandler) HandleStreamingFunc(_ context.Context, chunk []byte) {
+ 77 | 	chunkStr := string(chunk)
+ 78 | 	handler.LastTokens += chunkStr
+ 79 | 	var detectedKeyword string
+ 80 | 
+ 81 | 	// Buffer the last few chunks to match the longest keyword size
+ 82 | 	var longestSize int
+ 83 | 	for _, k := range handler.Keywords {
+ 84 | 		if len(k) > longestSize {
+ 85 | 			longestSize = len(k)
+ 86 | 		}
+ 87 | 	}
+ 88 | 
+ 89 | 	// Check for keywords
+ 90 | 	for _, k := range DefaultKeywords {
+ 91 | 		if strings.Contains(handler.LastTokens, k) {
+ 92 | 			handler.KeywordDetected = true
+ 93 | 			detectedKeyword = k
+ 94 | 		}
+ 95 | 	}
+ 96 | 
+ 97 | 	if len(handler.LastTokens) > longestSize {
+ 98 | 		handler.LastTokens = handler.LastTokens[len(handler.LastTokens)-longestSize:]
+ 99 | 	}
+100 | 
+101 | 	// Check for colon and set print mode.
+102 | 	if handler.KeywordDetected && !handler.PrintOutput {
+103 | 		// remove any other strings before the final answer
+104 | 		chunk = []byte(filterFinalString(chunkStr, detectedKeyword))
+105 | 		handler.PrintOutput = true
+106 | 	}
+107 | 
+108 | 	// Print the final output after the detection of keyword.
+109 | 	if handler.PrintOutput {
+110 | 		handler.egress <- chunk
+111 | 	}
+112 | }
+113 | 
+114 | func filterFinalString(chunkStr, keyword string) string {
+115 | 	chunkStr = strings.TrimLeft(chunkStr, " ")
+116 | 
+117 | 	index := strings.Index(chunkStr, keyword)
+118 | 	switch {
+119 | 	case index != -1:
+120 | 		chunkStr = chunkStr[index+len(keyword):]
+121 | 	case strings.HasPrefix(chunkStr, ":"):
+122 | 		chunkStr = strings.TrimPrefix(chunkStr, ":")
+123 | 	}
+124 | 
+125 | 	return strings.TrimLeft(chunkStr, " ")
+126 | }
+127 | 
+
+
+--------------------------------------------------------------------------------
+/callbacks/agent_final_stream_test.go:
+--------------------------------------------------------------------------------
+ 1 | package callbacks
+ 2 | 
+ 3 | import (
+ 4 | 	"testing"
+ 5 | 
+ 6 | 	"github.com/stretchr/testify/require"
+ 7 | )
+ 8 | 
+ 9 | func TestFilterFinalString(t *testing.T) {
+10 | 	t.Parallel()
+11 | 
+12 | 	cases := []struct {
+13 | 		keyword  string
+14 | 		inputStr string
+15 | 		expected string
+16 | 	}{
+17 | 		{
+18 | 			keyword:  "Final Answer:",
+19 | 			inputStr: "This is a correct final string.",
+20 | 			expected: "This is a correct final string.",
+21 | 		},
+22 | 		{
+23 | 			keyword:  "Final Answer:",
+24 | 			inputStr: " some other text above.\nFinal Answer: This is a correct final string.",
+25 | 			expected: "This is a correct final string.",
+26 | 		},
+27 | 		{
+28 | 			keyword:  "Final Answer:",
+29 | 			inputStr: " another text before. Final Answer: This is a correct final string.",
+30 | 			expected: "This is a correct final string.",
+31 | 		},
+32 | 		{
+33 | 			keyword:  "Final Answer:",
+34 | 			inputStr: `   :    This is a correct final string.`,
+35 | 			expected: "This is a correct final string.",
+36 | 		},
+37 | 		{
+38 | 			keyword:  "Customed KeyWord_2:",
+39 | 			inputStr: " some other text above.\nSome Customed KeyWord_2: This is a correct final string.",
+40 | 			expected: "This is a correct final string.",
+41 | 		},
+42 | 		{
+43 | 			keyword:  "Customed KeyWord_$#@-123:",
+44 | 			inputStr: " another text before keyword. Some Customed KeyWord_$#@-123: This is a correct final string.",
+45 | 			expected: "This is a correct final string.",
+46 | 		},
+47 | 	}
+48 | 
+49 | 	for _, tc := range cases {
+50 | 		filteredStr := filterFinalString(tc.inputStr, tc.keyword)
+51 | 		require.Equal(t, tc.expected, filteredStr)
+52 | 	}
+53 | }
+54 | 
+
+
+--------------------------------------------------------------------------------
+/callbacks/callbacks.go:
+--------------------------------------------------------------------------------
+ 1 | package callbacks
+ 2 | 
+ 3 | import (
+ 4 | 	"context"
+ 5 | 
+ 6 | 	"github.com/tmc/langchaingo/llms"
+ 7 | 	"github.com/tmc/langchaingo/schema"
+ 8 | )
+ 9 | 
+10 | // Handler is the interface that allows for hooking into specific parts of an
+11 | // LLM application.
+12 | //
+13 | //nolint:all
+14 | type Handler interface {
+15 | 	HandleText(ctx context.Context, text string)
+16 | 	HandleLLMStart(ctx context.Context, prompts []string)
+17 | 	HandleLLMGenerateContentStart(ctx context.Context, ms []llms.MessageContent)
+18 | 	HandleLLMGenerateContentEnd(ctx context.Context, res *llms.ContentResponse)
+19 | 	HandleLLMError(ctx context.Context, err error)
+20 | 	HandleChainStart(ctx context.Context, inputs map[string]any)
+21 | 	HandleChainEnd(ctx context.Context, outputs map[string]any)
+22 | 	HandleChainError(ctx context.Context, err error)
+23 | 	HandleToolStart(ctx context.Context, input string)
+24 | 	HandleToolEnd(ctx context.Context, output string)
+25 | 	HandleToolError(ctx context.Context, err error)
+26 | 	HandleAgentAction(ctx context.Context, action schema.AgentAction)
+27 | 	HandleAgentFinish(ctx context.Context, finish schema.AgentFinish)
+28 | 	HandleRetrieverStart(ctx context.Context, query string)
+29 | 	HandleRetrieverEnd(ctx context.Context, query string, documents []schema.Document)
+30 | 	HandleStreamingFunc(ctx context.Context, chunk []byte)
+31 | }
+32 | 
+33 | // HandlerHaver is an interface used to get callbacks handler.
+34 | type HandlerHaver interface {
+35 | 	GetCallbackHandler() Handler
+36 | }
+37 | 
+
+
+--------------------------------------------------------------------------------
+/callbacks/combining.go:
+--------------------------------------------------------------------------------
+  1 | package callbacks
+  2 | 
+  3 | import (
+  4 | 	"context"
+  5 | 
+  6 | 	"github.com/tmc/langchaingo/llms"
+  7 | 	"github.com/tmc/langchaingo/schema"
+  8 | )
+  9 | 
+ 10 | // CombiningHandler is a callback handler that combine multi callbacks.
+ 11 | type CombiningHandler struct {
+ 12 | 	Callbacks []Handler
+ 13 | }
+ 14 | 
+ 15 | var _ Handler = CombiningHandler{}
+ 16 | 
+ 17 | func (l CombiningHandler) HandleText(ctx context.Context, text string) {
+ 18 | 	for _, handle := range l.Callbacks {
+ 19 | 		handle.HandleText(ctx, text)
+ 20 | 	}
+ 21 | }
+ 22 | 
+ 23 | func (l CombiningHandler) HandleLLMStart(ctx context.Context, prompts []string) {
+ 24 | 	for _, handle := range l.Callbacks {
+ 25 | 		handle.HandleLLMStart(ctx, prompts)
+ 26 | 	}
+ 27 | }
+ 28 | 
+ 29 | func (l CombiningHandler) HandleLLMGenerateContentStart(ctx context.Context, ms []llms.MessageContent) {
+ 30 | 	for _, handle := range l.Callbacks {
+ 31 | 		handle.HandleLLMGenerateContentStart(ctx, ms)
+ 32 | 	}
+ 33 | }
+ 34 | 
+ 35 | func (l CombiningHandler) HandleLLMGenerateContentEnd(ctx context.Context, res *llms.ContentResponse) {
+ 36 | 	for _, handle := range l.Callbacks {
+ 37 | 		handle.HandleLLMGenerateContentEnd(ctx, res)
+ 38 | 	}
+ 39 | }
+ 40 | 
+ 41 | func (l CombiningHandler) HandleChainStart(ctx context.Context, inputs map[string]any) {
+ 42 | 	for _, handle := range l.Callbacks {
+ 43 | 		handle.HandleChainStart(ctx, inputs)
+ 44 | 	}
+ 45 | }
+ 46 | 
+ 47 | func (l CombiningHandler) HandleChainEnd(ctx context.Context, outputs map[string]any) {
+ 48 | 	for _, handle := range l.Callbacks {
+ 49 | 		handle.HandleChainEnd(ctx, outputs)
+ 50 | 	}
+ 51 | }
+ 52 | 
+ 53 | func (l CombiningHandler) HandleToolStart(ctx context.Context, input string) {
+ 54 | 	for _, handle := range l.Callbacks {
+ 55 | 		handle.HandleToolStart(ctx, input)
+ 56 | 	}
+ 57 | }
+ 58 | 
+ 59 | func (l CombiningHandler) HandleToolEnd(ctx context.Context, output string) {
+ 60 | 	for _, handle := range l.Callbacks {
+ 61 | 		handle.HandleToolEnd(ctx, output)
+ 62 | 	}
+ 63 | }
+ 64 | 
+ 65 | func (l CombiningHandler) HandleAgentAction(ctx context.Context, action schema.AgentAction) {
+ 66 | 	for _, handle := range l.Callbacks {
+ 67 | 		handle.HandleAgentAction(ctx, action)
+ 68 | 	}
+ 69 | }
+ 70 | 
+ 71 | func (l CombiningHandler) HandleAgentFinish(ctx context.Context, finish schema.AgentFinish) {
+ 72 | 	for _, handle := range l.Callbacks {
+ 73 | 		handle.HandleAgentFinish(ctx, finish)
+ 74 | 	}
+ 75 | }
+ 76 | 
+ 77 | func (l CombiningHandler) HandleRetrieverStart(ctx context.Context, query string) {
+ 78 | 	for _, handle := range l.Callbacks {
+ 79 | 		handle.HandleRetrieverStart(ctx, query)
+ 80 | 	}
+ 81 | }
+ 82 | 
+ 83 | func (l CombiningHandler) HandleRetrieverEnd(ctx context.Context, query string, documents []schema.Document) {
+ 84 | 	for _, handle := range l.Callbacks {
+ 85 | 		handle.HandleRetrieverEnd(ctx, query, documents)
+ 86 | 	}
+ 87 | }
+ 88 | 
+ 89 | func (l CombiningHandler) HandleStreamingFunc(ctx context.Context, chunk []byte) {
+ 90 | 	for _, handle := range l.Callbacks {
+ 91 | 		handle.HandleStreamingFunc(ctx, chunk)
+ 92 | 	}
+ 93 | }
+ 94 | 
+ 95 | func (l CombiningHandler) HandleChainError(ctx context.Context, err error) {
+ 96 | 	for _, handle := range l.Callbacks {
+ 97 | 		handle.HandleChainError(ctx, err)
+ 98 | 	}
+ 99 | }
+100 | 
+101 | func (l CombiningHandler) HandleLLMError(ctx context.Context, err error) {
+102 | 	for _, handle := range l.Callbacks {
+103 | 		handle.HandleLLMError(ctx, err)
+104 | 	}
+105 | }
+106 | 
+107 | func (l CombiningHandler) HandleToolError(ctx context.Context, err error) {
+108 | 	for _, handle := range l.Callbacks {
+109 | 		handle.HandleToolError(ctx, err)
+110 | 	}
+111 | }
+112 | 
+
+
+--------------------------------------------------------------------------------
+/callbacks/doc.go:
+--------------------------------------------------------------------------------
+1 | // Package callbacks includes a standard interface for hooking into various
+2 | // stages of your LLM application. The package contains an implementation of
+3 | // this interface that prints to the standard output.
+4 | package callbacks
+5 | 
+
+
+--------------------------------------------------------------------------------
+/callbacks/log.go:
+--------------------------------------------------------------------------------
+  1 | //nolint:forbidigo
+  2 | package callbacks
+  3 | 
+  4 | import (
+  5 | 	"context"
+  6 | 	"fmt"
+  7 | 	"strings"
+  8 | 
+  9 | 	"github.com/tmc/langchaingo/llms"
+ 10 | 	"github.com/tmc/langchaingo/schema"
+ 11 | )
+ 12 | 
+ 13 | // LogHandler is a callback handler that prints to the standard output.
+ 14 | type LogHandler struct{}
+ 15 | 
+ 16 | var _ Handler = LogHandler{}
+ 17 | 
+ 18 | func (l LogHandler) HandleLLMGenerateContentStart(_ context.Context, ms []llms.MessageContent) {
+ 19 | 	fmt.Println("Entering LLM with messages:")
+ 20 | 	for _, m := range ms {
+ 21 | 		// TODO: Implement logging of other content types
+ 22 | 		var buf strings.Builder
+ 23 | 		for _, t := range m.Parts {
+ 24 | 			if t, ok := t.(llms.TextContent); ok {
+ 25 | 				buf.WriteString(t.Text)
+ 26 | 			}
+ 27 | 		}
+ 28 | 		fmt.Println("Role:", m.Role)
+ 29 | 		fmt.Println("Text:", buf.String())
+ 30 | 	}
+ 31 | }
+ 32 | 
+ 33 | func (l LogHandler) HandleLLMGenerateContentEnd(_ context.Context, res *llms.ContentResponse) {
+ 34 | 	fmt.Println("Exiting LLM with response:")
+ 35 | 	for _, c := range res.Choices {
+ 36 | 		if c.Content != "" {
+ 37 | 			fmt.Println("Content:", c.Content)
+ 38 | 		}
+ 39 | 		if c.StopReason != "" {
+ 40 | 			fmt.Println("StopReason:", c.StopReason)
+ 41 | 		}
+ 42 | 		if len(c.GenerationInfo) > 0 {
+ 43 | 			fmt.Println("GenerationInfo:")
+ 44 | 			for k, v := range c.GenerationInfo {
+ 45 | 				fmt.Printf("%20s: %v\n", k, v)
+ 46 | 			}
+ 47 | 		}
+ 48 | 		if c.FuncCall != nil {
+ 49 | 			fmt.Println("FuncCall: ", c.FuncCall.Name, c.FuncCall.Arguments)
+ 50 | 		}
+ 51 | 	}
+ 52 | }
+ 53 | 
+ 54 | func (l LogHandler) HandleStreamingFunc(_ context.Context, chunk []byte) {
+ 55 | 	fmt.Println(string(chunk))
+ 56 | }
+ 57 | 
+ 58 | func (l LogHandler) HandleText(_ context.Context, text string) {
+ 59 | 	fmt.Println(text)
+ 60 | }
+ 61 | 
+ 62 | func (l LogHandler) HandleLLMStart(_ context.Context, prompts []string) {
+ 63 | 	fmt.Println("Entering LLM with prompts:", prompts)
+ 64 | }
+ 65 | 
+ 66 | func (l LogHandler) HandleLLMError(_ context.Context, err error) {
+ 67 | 	fmt.Println("Exiting LLM with error:", err)
+ 68 | }
+ 69 | 
+ 70 | func (l LogHandler) HandleChainStart(_ context.Context, inputs map[string]any) {
+ 71 | 	fmt.Println("Entering chain with inputs:", formatChainValues(inputs))
+ 72 | }
+ 73 | 
+ 74 | func (l LogHandler) HandleChainEnd(_ context.Context, outputs map[string]any) {
+ 75 | 	fmt.Println("Exiting chain with outputs:", formatChainValues(outputs))
+ 76 | }
+ 77 | 
+ 78 | func (l LogHandler) HandleChainError(_ context.Context, err error) {
+ 79 | 	fmt.Println("Exiting chain with error:", err)
+ 80 | }
+ 81 | 
+ 82 | func (l LogHandler) HandleToolStart(_ context.Context, input string) {
+ 83 | 	fmt.Println("Entering tool with input:", removeNewLines(input))
+ 84 | }
+ 85 | 
+ 86 | func (l LogHandler) HandleToolEnd(_ context.Context, output string) {
+ 87 | 	fmt.Println("Exiting tool with output:", removeNewLines(output))
+ 88 | }
+ 89 | 
+ 90 | func (l LogHandler) HandleToolError(_ context.Context, err error) {
+ 91 | 	fmt.Println("Exiting tool with error:", err)
+ 92 | }
+ 93 | 
+ 94 | func (l LogHandler) HandleAgentAction(_ context.Context, action schema.AgentAction) {
+ 95 | 	fmt.Println("Agent selected action:", formatAgentAction(action))
+ 96 | }
+ 97 | 
+ 98 | func (l LogHandler) HandleAgentFinish(_ context.Context, finish schema.AgentFinish) {
+ 99 | 	fmt.Printf("Agent finish: %v \n", finish)
+100 | }
+101 | 
+102 | func (l LogHandler) HandleRetrieverStart(_ context.Context, query string) {
+103 | 	fmt.Println("Entering retriever with query:", removeNewLines(query))
+104 | }
+105 | 
+106 | func (l LogHandler) HandleRetrieverEnd(_ context.Context, query string, documents []schema.Document) {
+107 | 	fmt.Println("Exiting retriever with documents for query:", documents, query)
+108 | }
+109 | 
+110 | func formatChainValues(values map[string]any) string {
+111 | 	output := ""
+112 | 	for key, value := range values {
+113 | 		output += fmt.Sprintf("\"%s\" : \"%s\", ", removeNewLines(key), removeNewLines(value))
+114 | 	}
+115 | 
+116 | 	return output
+117 | }
+118 | 
+119 | func formatAgentAction(action schema.AgentAction) string {
+120 | 	return fmt.Sprintf("\"%s\" with input \"%s\"", removeNewLines(action.Tool), removeNewLines(action.ToolInput))
+121 | }
+122 | 
+123 | func removeNewLines(s any) string {
+124 | 	return strings.ReplaceAll(fmt.Sprint(s), "\n", " ")
+125 | }
+126 | 
+
+
+--------------------------------------------------------------------------------
+/callbacks/log_stream.go:
+--------------------------------------------------------------------------------
+ 1 | //nolint:forbidigo
+ 2 | package callbacks
+ 3 | 
+ 4 | import (
+ 5 | 	"context"
+ 6 | 	"fmt"
+ 7 | )
+ 8 | 
+ 9 | // StreamLogHandler is a callback handler that prints to the standard output streaming.
+10 | type StreamLogHandler struct {
+11 | 	SimpleHandler
+12 | }
+13 | 
+14 | var _ Handler = StreamLogHandler{}
+15 | 
+16 | func (StreamLogHandler) HandleStreamingFunc(_ context.Context, chunk []byte) {
+17 | 	fmt.Println(string(chunk))
+18 | }
+19 | 
+
+
+--------------------------------------------------------------------------------
+/callbacks/simple.go:
+--------------------------------------------------------------------------------
+ 1 | //nolint:forbidigo
+ 2 | package callbacks
+ 3 | 
+ 4 | import (
+ 5 | 	"context"
+ 6 | 
+ 7 | 	"github.com/tmc/langchaingo/llms"
+ 8 | 	"github.com/tmc/langchaingo/schema"
+ 9 | )
+10 | 
+11 | type SimpleHandler struct{}
+12 | 
+13 | var _ Handler = SimpleHandler{}
+14 | 
+15 | func (SimpleHandler) HandleText(context.Context, string)                                   {}
+16 | func (SimpleHandler) HandleLLMStart(context.Context, []string)                             {}
+17 | func (SimpleHandler) HandleLLMGenerateContentStart(context.Context, []llms.MessageContent) {}
+18 | func (SimpleHandler) HandleLLMGenerateContentEnd(context.Context, *llms.ContentResponse)   {}
+19 | func (SimpleHandler) HandleLLMError(context.Context, error)                                {}
+20 | func (SimpleHandler) HandleChainStart(context.Context, map[string]any)                     {}
+21 | func (SimpleHandler) HandleChainEnd(context.Context, map[string]any)                       {}
+22 | func (SimpleHandler) HandleChainError(context.Context, error)                              {}
+23 | func (SimpleHandler) HandleToolStart(context.Context, string)                              {}
+24 | func (SimpleHandler) HandleToolEnd(context.Context, string)                                {}
+25 | func (SimpleHandler) HandleToolError(context.Context, error)                               {}
+26 | func (SimpleHandler) HandleAgentAction(context.Context, schema.AgentAction)                {}
+27 | func (SimpleHandler) HandleAgentFinish(context.Context, schema.AgentFinish)                {}
+28 | func (SimpleHandler) HandleRetrieverStart(context.Context, string)                         {}
+29 | func (SimpleHandler) HandleRetrieverEnd(context.Context, string, []schema.Document)        {}
+30 | func (SimpleHandler) HandleStreamingFunc(context.Context, []byte)                          {}
+31 | 
+
+
+--------------------------------------------------------------------------------
