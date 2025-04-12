@@ -274,7 +274,6 @@ func (c *MultiServerMCPClient) connectToServerViaSSE(ctx context.Context, server
 
 	opts := []client.ClientOption{
 		client.WithHeaders(config.Headers),
-		client.WithSSEReadTimeout(config.SSEReadTimeout),
 		// Note: mcp-go SSE client doesn't have a direct HTTP timeout option during creation,
 		// but the underlying http client might respect context deadlines.
 	}
