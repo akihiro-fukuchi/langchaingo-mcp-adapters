@@ -9,91 +9,141 @@
 
 /client/client.go:
 --------------------------------------------------------------------------------
- 1 | // Package client provides MCP (Model Control Protocol) client implementations.
- 2 | package client
- 3 | 
- 4 | import (
- 5 | 	"context"
- 6 | 
- 7 | 	"github.com/mark3labs/mcp-go/mcp"
- 8 | )
- 9 | 
-10 | // MCPClient represents an MCP client interface
-11 | type MCPClient interface {
-12 | 	// Initialize sends the initial connection request to the server
-13 | 	Initialize(
-14 | 		ctx context.Context,
-15 | 		request mcp.InitializeRequest,
-16 | 	) (*mcp.InitializeResult, error)
-17 | 
-18 | 	// Ping checks if the server is alive
-19 | 	Ping(ctx context.Context) error
-20 | 
-21 | 	// ListResources requests a list of available resources from the server
-22 | 	ListResources(
-23 | 		ctx context.Context,
-24 | 		request mcp.ListResourcesRequest,
-25 | 	) (*mcp.ListResourcesResult, error)
-26 | 
-27 | 	// ListResourceTemplates requests a list of available resource templates from the server
-28 | 	ListResourceTemplates(
-29 | 		ctx context.Context,
-30 | 		request mcp.ListResourceTemplatesRequest,
-31 | 	) (*mcp.ListResourceTemplatesResult,
-32 | 		error)
-33 | 
-34 | 	// ReadResource reads a specific resource from the server
-35 | 	ReadResource(
-36 | 		ctx context.Context,
-37 | 		request mcp.ReadResourceRequest,
-38 | 	) (*mcp.ReadResourceResult, error)
-39 | 
-40 | 	// Subscribe requests notifications for changes to a specific resource
-41 | 	Subscribe(ctx context.Context, request mcp.SubscribeRequest) error
-42 | 
-43 | 	// Unsubscribe cancels notifications for a specific resource
-44 | 	Unsubscribe(ctx context.Context, request mcp.UnsubscribeRequest) error
-45 | 
-46 | 	// ListPrompts requests a list of available prompts from the server
-47 | 	ListPrompts(
-48 | 		ctx context.Context,
-49 | 		request mcp.ListPromptsRequest,
-50 | 	) (*mcp.ListPromptsResult, error)
-51 | 
-52 | 	// GetPrompt retrieves a specific prompt from the server
-53 | 	GetPrompt(
-54 | 		ctx context.Context,
-55 | 		request mcp.GetPromptRequest,
-56 | 	) (*mcp.GetPromptResult, error)
-57 | 
-58 | 	// ListTools requests a list of available tools from the server
-59 | 	ListTools(
-60 | 		ctx context.Context,
-61 | 		request mcp.ListToolsRequest,
-62 | 	) (*mcp.ListToolsResult, error)
-63 | 
-64 | 	// CallTool invokes a specific tool on the server
-65 | 	CallTool(
-66 | 		ctx context.Context,
-67 | 		request mcp.CallToolRequest,
-68 | 	) (*mcp.CallToolResult, error)
-69 | 
-70 | 	// SetLevel sets the logging level for the server
-71 | 	SetLevel(ctx context.Context, request mcp.SetLevelRequest) error
-72 | 
-73 | 	// Complete requests completion options for a given argument
-74 | 	Complete(
-75 | 		ctx context.Context,
-76 | 		request mcp.CompleteRequest,
-77 | 	) (*mcp.CompleteResult, error)
-78 | 
-79 | 	// Close client connection and cleanup resources
-80 | 	Close() error
-81 | 
-82 | 	// OnNotification registers a handler for notifications
-83 | 	OnNotification(handler func(notification mcp.JSONRPCNotification))
-84 | }
-85 | 
+  1 | // Package client provides MCP (Model Control Protocol) client implementations.
+  2 | package client
+  3 | 
+  4 | import (
+  5 | 	"context"
+  6 | 	"encoding/json"
+  7 | 	"fmt"
+  8 | 
+  9 | 	"github.com/mark3labs/mcp-go/mcp"
+ 10 | )
+ 11 | 
+ 12 | // MCPClient represents an MCP client interface
+ 13 | type MCPClient interface {
+ 14 | 	// Initialize sends the initial connection request to the server
+ 15 | 	Initialize(
+ 16 | 		ctx context.Context,
+ 17 | 		request mcp.InitializeRequest,
+ 18 | 	) (*mcp.InitializeResult, error)
+ 19 | 
+ 20 | 	// Ping checks if the server is alive
+ 21 | 	Ping(ctx context.Context) error
+ 22 | 
+ 23 | 	// ListResourcesByPage manually list resources by page.
+ 24 | 	ListResourcesByPage(
+ 25 | 		ctx context.Context,
+ 26 | 		request mcp.ListResourcesRequest,
+ 27 | 	) (*mcp.ListResourcesResult, error)
+ 28 | 
+ 29 | 	// ListResources requests a list of available resources from the server
+ 30 | 	ListResources(
+ 31 | 		ctx context.Context,
+ 32 | 		request mcp.ListResourcesRequest,
+ 33 | 	) (*mcp.ListResourcesResult, error)
+ 34 | 
+ 35 | 	// ListResourceTemplatesByPage manually list resource templates by page.
+ 36 | 	ListResourceTemplatesByPage(
+ 37 | 		ctx context.Context,
+ 38 | 		request mcp.ListResourceTemplatesRequest,
+ 39 | 	) (*mcp.ListResourceTemplatesResult,
+ 40 | 		error)
+ 41 | 
+ 42 | 	// ListResourceTemplates requests a list of available resource templates from the server
+ 43 | 	ListResourceTemplates(
+ 44 | 		ctx context.Context,
+ 45 | 		request mcp.ListResourceTemplatesRequest,
+ 46 | 	) (*mcp.ListResourceTemplatesResult,
+ 47 | 		error)
+ 48 | 
+ 49 | 	// ReadResource reads a specific resource from the server
+ 50 | 	ReadResource(
+ 51 | 		ctx context.Context,
+ 52 | 		request mcp.ReadResourceRequest,
+ 53 | 	) (*mcp.ReadResourceResult, error)
+ 54 | 
+ 55 | 	// Subscribe requests notifications for changes to a specific resource
+ 56 | 	Subscribe(ctx context.Context, request mcp.SubscribeRequest) error
+ 57 | 
+ 58 | 	// Unsubscribe cancels notifications for a specific resource
+ 59 | 	Unsubscribe(ctx context.Context, request mcp.UnsubscribeRequest) error
+ 60 | 
+ 61 | 	// ListPromptsByPage manually list prompts by page.
+ 62 | 	ListPromptsByPage(
+ 63 | 		ctx context.Context,
+ 64 | 		request mcp.ListPromptsRequest,
+ 65 | 	) (*mcp.ListPromptsResult, error)
+ 66 | 
+ 67 | 	// ListPrompts requests a list of available prompts from the server
+ 68 | 	ListPrompts(
+ 69 | 		ctx context.Context,
+ 70 | 		request mcp.ListPromptsRequest,
+ 71 | 	) (*mcp.ListPromptsResult, error)
+ 72 | 
+ 73 | 	// GetPrompt retrieves a specific prompt from the server
+ 74 | 	GetPrompt(
+ 75 | 		ctx context.Context,
+ 76 | 		request mcp.GetPromptRequest,
+ 77 | 	) (*mcp.GetPromptResult, error)
+ 78 | 
+ 79 | 	// ListToolsByPage manually list tools by page.
+ 80 | 	ListToolsByPage(
+ 81 | 		ctx context.Context,
+ 82 | 		request mcp.ListToolsRequest,
+ 83 | 	) (*mcp.ListToolsResult, error)
+ 84 | 
+ 85 | 	// ListTools requests a list of available tools from the server
+ 86 | 	ListTools(
+ 87 | 		ctx context.Context,
+ 88 | 		request mcp.ListToolsRequest,
+ 89 | 	) (*mcp.ListToolsResult, error)
+ 90 | 
+ 91 | 	// CallTool invokes a specific tool on the server
+ 92 | 	CallTool(
+ 93 | 		ctx context.Context,
+ 94 | 		request mcp.CallToolRequest,
+ 95 | 	) (*mcp.CallToolResult, error)
+ 96 | 
+ 97 | 	// SetLevel sets the logging level for the server
+ 98 | 	SetLevel(ctx context.Context, request mcp.SetLevelRequest) error
+ 99 | 
+100 | 	// Complete requests completion options for a given argument
+101 | 	Complete(
+102 | 		ctx context.Context,
+103 | 		request mcp.CompleteRequest,
+104 | 	) (*mcp.CompleteResult, error)
+105 | 
+106 | 	// Close client connection and cleanup resources
+107 | 	Close() error
+108 | 
+109 | 	// OnNotification registers a handler for notifications
+110 | 	OnNotification(handler func(notification mcp.JSONRPCNotification))
+111 | }
+112 | 
+113 | type mcpClient interface {
+114 | 	MCPClient
+115 | 
+116 | 	sendRequest(ctx context.Context, method string, params interface{}) (*json.RawMessage, error)
+117 | }
+118 | 
+119 | func listByPage[T any](
+120 | 	ctx context.Context,
+121 | 	client mcpClient,
+122 | 	request mcp.PaginatedRequest,
+123 | 	method string,
+124 | ) (*T, error) {
+125 | 	response, err := client.sendRequest(ctx, method, request.Params)
+126 | 	if err != nil {
+127 | 		return nil, err
+128 | 	}
+129 | 	var result T
+130 | 	if err := json.Unmarshal(*response, &result); err != nil {
+131 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+132 | 	}
+133 | 	return &result, nil
+134 | }
+135 | 
 
 
 --------------------------------------------------------------------------------
@@ -124,570 +174,635 @@
  23 | // while sending requests over regular HTTP POST calls. The client handles
  24 | // automatic reconnection and message routing between requests and responses.
  25 | type SSEMCPClient struct {
- 26 | 	baseURL        *url.URL
- 27 | 	endpoint       *url.URL
- 28 | 	httpClient     *http.Client
- 29 | 	requestID      atomic.Int64
- 30 | 	responses      map[int64]chan RPCResponse
- 31 | 	mu             sync.RWMutex
- 32 | 	done           chan struct{}
- 33 | 	initialized    bool
- 34 | 	notifications  []func(mcp.JSONRPCNotification)
- 35 | 	notifyMu       sync.RWMutex
- 36 | 	endpointChan   chan struct{}
- 37 | 	capabilities   mcp.ServerCapabilities
- 38 | 	headers        map[string]string
- 39 | 	sseReadTimeout time.Duration
- 40 | }
- 41 | 
- 42 | type ClientOption func(*SSEMCPClient)
- 43 | 
- 44 | func WithHeaders(headers map[string]string) ClientOption {
- 45 | 	return func(sc *SSEMCPClient) {
- 46 | 		sc.headers = headers
- 47 | 	}
- 48 | }
- 49 | 
- 50 | func WithSSEReadTimeout(timeout time.Duration) ClientOption {
- 51 | 	return func(sc *SSEMCPClient) {
- 52 | 		sc.sseReadTimeout = timeout
- 53 | 	}
- 54 | }
- 55 | 
- 56 | // NewSSEMCPClient creates a new SSE-based MCP client with the given base URL.
- 57 | // Returns an error if the URL is invalid.
- 58 | func NewSSEMCPClient(baseURL string, options ...ClientOption) (*SSEMCPClient, error) {
- 59 | 	parsedURL, err := url.Parse(baseURL)
- 60 | 	if err != nil {
- 61 | 		return nil, fmt.Errorf("invalid URL: %w", err)
- 62 | 	}
- 63 | 
- 64 | 	smc := &SSEMCPClient{
- 65 | 		baseURL:        parsedURL,
- 66 | 		httpClient:     &http.Client{},
- 67 | 		responses:      make(map[int64]chan RPCResponse),
- 68 | 		done:           make(chan struct{}),
- 69 | 		endpointChan:   make(chan struct{}),
- 70 | 		sseReadTimeout: 30 * time.Second,
- 71 | 		headers:        make(map[string]string),
- 72 | 	}
- 73 | 
- 74 | 	for _, opt := range options {
- 75 | 		opt(smc)
- 76 | 	}
- 77 | 
- 78 | 	return smc, nil
- 79 | }
+ 26 | 	baseURL       *url.URL
+ 27 | 	endpoint      *url.URL
+ 28 | 	httpClient    *http.Client
+ 29 | 	requestID     atomic.Int64
+ 30 | 	responses     map[int64]chan RPCResponse
+ 31 | 	mu            sync.RWMutex
+ 32 | 	done          chan struct{}
+ 33 | 	initialized   bool
+ 34 | 	notifications []func(mcp.JSONRPCNotification)
+ 35 | 	notifyMu      sync.RWMutex
+ 36 | 	endpointChan  chan struct{}
+ 37 | 	capabilities  mcp.ServerCapabilities
+ 38 | 	headers       map[string]string
+ 39 | }
+ 40 | 
+ 41 | type ClientOption func(*SSEMCPClient)
+ 42 | 
+ 43 | func WithHeaders(headers map[string]string) ClientOption {
+ 44 | 	return func(sc *SSEMCPClient) {
+ 45 | 		sc.headers = headers
+ 46 | 	}
+ 47 | }
+ 48 | 
+ 49 | // NewSSEMCPClient creates a new SSE-based MCP client with the given base URL.
+ 50 | // Returns an error if the URL is invalid.
+ 51 | func NewSSEMCPClient(baseURL string, options ...ClientOption) (*SSEMCPClient, error) {
+ 52 | 	parsedURL, err := url.Parse(baseURL)
+ 53 | 	if err != nil {
+ 54 | 		return nil, fmt.Errorf("invalid URL: %w", err)
+ 55 | 	}
+ 56 | 
+ 57 | 	smc := &SSEMCPClient{
+ 58 | 		baseURL:      parsedURL,
+ 59 | 		httpClient:   &http.Client{},
+ 60 | 		responses:    make(map[int64]chan RPCResponse),
+ 61 | 		done:         make(chan struct{}),
+ 62 | 		endpointChan: make(chan struct{}),
+ 63 | 		headers:      make(map[string]string),
+ 64 | 	}
+ 65 | 
+ 66 | 	for _, opt := range options {
+ 67 | 		opt(smc)
+ 68 | 	}
+ 69 | 
+ 70 | 	return smc, nil
+ 71 | }
+ 72 | 
+ 73 | // Start initiates the SSE connection to the server and waits for the endpoint information.
+ 74 | // Returns an error if the connection fails or times out waiting for the endpoint.
+ 75 | func (c *SSEMCPClient) Start(ctx context.Context) error {
+ 76 | 
+ 77 | 	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL.String(), nil)
+ 78 | 
+ 79 | 	if err != nil {
  80 | 
- 81 | // Start initiates the SSE connection to the server and waits for the endpoint information.
- 82 | // Returns an error if the connection fails or times out waiting for the endpoint.
- 83 | func (c *SSEMCPClient) Start(ctx context.Context) error {
+ 81 | 		return fmt.Errorf("failed to create request: %w", err)
+ 82 | 
+ 83 | 	}
  84 | 
- 85 | 	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL.String(), nil)
- 86 | 
- 87 | 	if err != nil {
- 88 | 
- 89 | 		return fmt.Errorf("failed to create request: %w", err)
- 90 | 
- 91 | 	}
- 92 | 
- 93 | 	req.Header.Set("Accept", "text/event-stream")
- 94 | 	req.Header.Set("Cache-Control", "no-cache")
- 95 | 	req.Header.Set("Connection", "keep-alive")
+ 85 | 	req.Header.Set("Accept", "text/event-stream")
+ 86 | 	req.Header.Set("Cache-Control", "no-cache")
+ 87 | 	req.Header.Set("Connection", "keep-alive")
+ 88 | 	for k, v := range c.headers {
+ 89 | 		req.Header.Set(k, v)
+ 90 | 	}
+ 91 | 
+ 92 | 	resp, err := c.httpClient.Do(req)
+ 93 | 	if err != nil {
+ 94 | 		return fmt.Errorf("failed to connect to SSE stream: %w", err)
+ 95 | 	}
  96 | 
- 97 | 	resp, err := c.httpClient.Do(req)
- 98 | 	if err != nil {
- 99 | 		return fmt.Errorf("failed to connect to SSE stream: %w", err)
+ 97 | 	if resp.StatusCode != http.StatusOK {
+ 98 | 		resp.Body.Close()
+ 99 | 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 100 | 	}
 101 | 
-102 | 	if resp.StatusCode != http.StatusOK {
-103 | 		resp.Body.Close()
-104 | 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-105 | 	}
-106 | 
-107 | 	go c.readSSE(resp.Body)
-108 | 
-109 | 	// Wait for the endpoint to be received
-110 | 
-111 | 	select {
-112 | 	case <-c.endpointChan:
-113 | 		// Endpoint received, proceed
-114 | 	case <-ctx.Done():
-115 | 		return fmt.Errorf("context cancelled while waiting for endpoint")
-116 | 	case <-time.After(30 * time.Second): // Add a timeout
-117 | 		return fmt.Errorf("timeout waiting for endpoint")
-118 | 	}
-119 | 
-120 | 	return nil
-121 | }
+102 | 	go c.readSSE(resp.Body)
+103 | 
+104 | 	// Wait for the endpoint to be received
+105 | 
+106 | 	select {
+107 | 	case <-c.endpointChan:
+108 | 		// Endpoint received, proceed
+109 | 	case <-ctx.Done():
+110 | 		return fmt.Errorf("context cancelled while waiting for endpoint")
+111 | 	case <-time.After(30 * time.Second): // Add a timeout
+112 | 		return fmt.Errorf("timeout waiting for endpoint")
+113 | 	}
+114 | 
+115 | 	return nil
+116 | }
+117 | 
+118 | // readSSE continuously reads the SSE stream and processes events.
+119 | // It runs until the connection is closed or an error occurs.
+120 | func (c *SSEMCPClient) readSSE(reader io.ReadCloser) {
+121 | 	defer reader.Close()
 122 | 
-123 | // readSSE continuously reads the SSE stream and processes events.
-124 | // It runs until the connection is closed or an error occurs.
-125 | func (c *SSEMCPClient) readSSE(reader io.ReadCloser) {
-126 | 	defer reader.Close()
-127 | 
-128 | 	br := bufio.NewReader(reader)
-129 | 	var event, data string
-130 | 
-131 | 	ctx, cancel := context.WithTimeout(context.Background(), c.sseReadTimeout)
-132 | 	defer cancel()
-133 | 
-134 | 	for {
-135 | 		select {
-136 | 		case <-ctx.Done():
-137 | 			return
-138 | 		default:
-139 | 			line, err := br.ReadString('\n')
-140 | 			if err != nil {
-141 | 				if err == io.EOF {
-142 | 					// Process any pending event before exit
-143 | 					if event != "" && data != "" {
-144 | 						c.handleSSEEvent(event, data)
-145 | 					}
-146 | 					break
-147 | 				}
-148 | 				select {
-149 | 				case <-c.done:
-150 | 					return
-151 | 				default:
-152 | 					fmt.Printf("SSE stream error: %v\n", err)
-153 | 					return
-154 | 				}
-155 | 			}
-156 | 
-157 | 			// Remove only newline markers
-158 | 			line = strings.TrimRight(line, "\r\n")
-159 | 			if line == "" {
-160 | 				// Empty line means end of event
-161 | 				if event != "" && data != "" {
-162 | 					c.handleSSEEvent(event, data)
-163 | 					event = ""
-164 | 					data = ""
-165 | 				}
-166 | 				continue
-167 | 			}
-168 | 
-169 | 			if strings.HasPrefix(line, "event:") {
-170 | 				event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-171 | 			} else if strings.HasPrefix(line, "data:") {
-172 | 				data = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-173 | 			}
-174 | 		}
-175 | 	}
-176 | }
-177 | 
-178 | // handleSSEEvent processes SSE events based on their type.
-179 | // Handles 'endpoint' events for connection setup and 'message' events for JSON-RPC communication.
-180 | func (c *SSEMCPClient) handleSSEEvent(event, data string) {
-181 | 	switch event {
-182 | 	case "endpoint":
-183 | 		endpoint, err := c.baseURL.Parse(data)
-184 | 		if err != nil {
-185 | 			fmt.Printf("Error parsing endpoint URL: %v\n", err)
-186 | 			return
-187 | 		}
-188 | 		if endpoint.Host != c.baseURL.Host {
-189 | 			fmt.Printf("Endpoint origin does not match connection origin\n")
-190 | 			return
-191 | 		}
-192 | 		c.endpoint = endpoint
-193 | 		close(c.endpointChan)
-194 | 
-195 | 	case "message":
-196 | 		var baseMessage struct {
-197 | 			JSONRPC string          `json:"jsonrpc"`
-198 | 			ID      *int64          `json:"id,omitempty"`
-199 | 			Method  string          `json:"method,omitempty"`
-200 | 			Result  json.RawMessage `json:"result,omitempty"`
-201 | 			Error   *struct {
-202 | 				Code    int    `json:"code"`
-203 | 				Message string `json:"message"`
-204 | 			} `json:"error,omitempty"`
-205 | 		}
-206 | 
-207 | 		if err := json.Unmarshal([]byte(data), &baseMessage); err != nil {
-208 | 			fmt.Printf("Error unmarshaling message: %v\n", err)
-209 | 			return
-210 | 		}
-211 | 
-212 | 		// Handle notification
-213 | 		if baseMessage.ID == nil {
-214 | 			var notification mcp.JSONRPCNotification
-215 | 			if err := json.Unmarshal([]byte(data), &notification); err != nil {
-216 | 				return
-217 | 			}
-218 | 			c.notifyMu.RLock()
-219 | 			for _, handler := range c.notifications {
-220 | 				handler(notification)
-221 | 			}
-222 | 			c.notifyMu.RUnlock()
-223 | 			return
-224 | 		}
-225 | 
-226 | 		c.mu.RLock()
-227 | 		ch, ok := c.responses[*baseMessage.ID]
-228 | 		c.mu.RUnlock()
-229 | 
-230 | 		if ok {
-231 | 			if baseMessage.Error != nil {
-232 | 				ch <- RPCResponse{
-233 | 					Error: &baseMessage.Error.Message,
-234 | 				}
-235 | 			} else {
-236 | 				ch <- RPCResponse{
-237 | 					Response: &baseMessage.Result,
-238 | 				}
-239 | 			}
-240 | 			c.mu.Lock()
-241 | 			delete(c.responses, *baseMessage.ID)
-242 | 			c.mu.Unlock()
-243 | 		}
-244 | 	}
-245 | }
-246 | 
-247 | // OnNotification registers a handler function to be called when notifications are received.
-248 | // Multiple handlers can be registered and will be called in the order they were added.
-249 | func (c *SSEMCPClient) OnNotification(
-250 | 	handler func(notification mcp.JSONRPCNotification),
-251 | ) {
-252 | 	c.notifyMu.Lock()
-253 | 	defer c.notifyMu.Unlock()
-254 | 	c.notifications = append(c.notifications, handler)
-255 | }
-256 | 
-257 | // sendRequest sends a JSON-RPC request to the server and waits for a response.
-258 | // Returns the raw JSON response message or an error if the request fails.
-259 | func (c *SSEMCPClient) sendRequest(
-260 | 	ctx context.Context,
-261 | 	method string,
-262 | 	params interface{},
-263 | ) (*json.RawMessage, error) {
-264 | 	if !c.initialized && method != "initialize" {
-265 | 		return nil, fmt.Errorf("client not initialized")
-266 | 	}
-267 | 
-268 | 	if c.endpoint == nil {
-269 | 		return nil, fmt.Errorf("endpoint not received")
-270 | 	}
-271 | 
-272 | 	id := c.requestID.Add(1)
-273 | 
-274 | 	request := mcp.JSONRPCRequest{
-275 | 		JSONRPC: mcp.JSONRPC_VERSION,
-276 | 		ID:      id,
-277 | 		Request: mcp.Request{
-278 | 			Method: method,
-279 | 		},
-280 | 		Params: params,
-281 | 	}
-282 | 
-283 | 	requestBytes, err := json.Marshal(request)
-284 | 	if err != nil {
-285 | 		return nil, fmt.Errorf("failed to marshal request: %w", err)
-286 | 	}
-287 | 
-288 | 	responseChan := make(chan RPCResponse, 1)
-289 | 	c.mu.Lock()
-290 | 	c.responses[id] = responseChan
-291 | 	c.mu.Unlock()
-292 | 
-293 | 	req, err := http.NewRequestWithContext(
-294 | 		ctx,
-295 | 		"POST",
-296 | 		c.endpoint.String(),
-297 | 		bytes.NewReader(requestBytes),
-298 | 	)
-299 | 	if err != nil {
-300 | 		return nil, fmt.Errorf("failed to create request: %w", err)
-301 | 	}
-302 | 
-303 | 	req.Header.Set("Content-Type", "application/json")
-304 | 	// set custom http headers
-305 | 	for k, v := range c.headers {
-306 | 		req.Header.Set(k, v)
-307 | 	}
-308 | 
-309 | 	resp, err := c.httpClient.Do(req)
-310 | 	if err != nil {
-311 | 		return nil, fmt.Errorf("failed to send request: %w", err)
-312 | 	}
-313 | 	defer resp.Body.Close()
-314 | 
-315 | 	if resp.StatusCode != http.StatusOK &&
-316 | 		resp.StatusCode != http.StatusAccepted {
-317 | 		body, _ := io.ReadAll(resp.Body)
-318 | 		return nil, fmt.Errorf(
-319 | 			"request failed with status %d: %s",
-320 | 			resp.StatusCode,
-321 | 			body,
-322 | 		)
-323 | 	}
-324 | 
-325 | 	select {
-326 | 	case <-ctx.Done():
-327 | 		c.mu.Lock()
-328 | 		delete(c.responses, id)
-329 | 		c.mu.Unlock()
-330 | 		return nil, ctx.Err()
-331 | 	case response := <-responseChan:
-332 | 		if response.Error != nil {
-333 | 			return nil, errors.New(*response.Error)
-334 | 		}
-335 | 		return response.Response, nil
-336 | 	}
-337 | }
-338 | 
-339 | func (c *SSEMCPClient) Initialize(
-340 | 	ctx context.Context,
-341 | 	request mcp.InitializeRequest,
-342 | ) (*mcp.InitializeResult, error) {
-343 | 	// Ensure we send a params object with all required fields
-344 | 	params := struct {
-345 | 		ProtocolVersion string                 `json:"protocolVersion"`
-346 | 		ClientInfo      mcp.Implementation     `json:"clientInfo"`
-347 | 		Capabilities    mcp.ClientCapabilities `json:"capabilities"`
-348 | 	}{
-349 | 		ProtocolVersion: request.Params.ProtocolVersion,
-350 | 		ClientInfo:      request.Params.ClientInfo,
-351 | 		Capabilities:    request.Params.Capabilities, // Will be empty struct if not set
-352 | 	}
-353 | 
-354 | 	response, err := c.sendRequest(ctx, "initialize", params)
-355 | 	if err != nil {
-356 | 		return nil, err
-357 | 	}
+123 | 	br := bufio.NewReader(reader)
+124 | 	var event, data string
+125 | 
+126 | 	for {
+127 | 		select {
+128 | 		case <-c.done:
+129 | 			return
+130 | 		default:
+131 | 			line, err := br.ReadString('\n')
+132 | 			if err != nil {
+133 | 				if err == io.EOF {
+134 | 					// Process any pending event before exit
+135 | 					if event != "" && data != "" {
+136 | 						c.handleSSEEvent(event, data)
+137 | 					}
+138 | 					break
+139 | 				}
+140 | 				select {
+141 | 				case <-c.done:
+142 | 					return
+143 | 				default:
+144 | 					fmt.Printf("SSE stream error: %v\n", err)
+145 | 					return
+146 | 				}
+147 | 			}
+148 | 
+149 | 			// Remove only newline markers
+150 | 			line = strings.TrimRight(line, "\r\n")
+151 | 			if line == "" {
+152 | 				// Empty line means end of event
+153 | 				if event != "" && data != "" {
+154 | 					c.handleSSEEvent(event, data)
+155 | 					event = ""
+156 | 					data = ""
+157 | 				}
+158 | 				continue
+159 | 			}
+160 | 
+161 | 			if strings.HasPrefix(line, "event:") {
+162 | 				event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+163 | 			} else if strings.HasPrefix(line, "data:") {
+164 | 				data = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+165 | 			}
+166 | 		}
+167 | 	}
+168 | }
+169 | 
+170 | // handleSSEEvent processes SSE events based on their type.
+171 | // Handles 'endpoint' events for connection setup and 'message' events for JSON-RPC communication.
+172 | func (c *SSEMCPClient) handleSSEEvent(event, data string) {
+173 | 	switch event {
+174 | 	case "endpoint":
+175 | 		endpoint, err := c.baseURL.Parse(data)
+176 | 		if err != nil {
+177 | 			fmt.Printf("Error parsing endpoint URL: %v\n", err)
+178 | 			return
+179 | 		}
+180 | 		if endpoint.Host != c.baseURL.Host {
+181 | 			fmt.Printf("Endpoint origin does not match connection origin\n")
+182 | 			return
+183 | 		}
+184 | 		c.endpoint = endpoint
+185 | 		close(c.endpointChan)
+186 | 
+187 | 	case "message":
+188 | 		var baseMessage struct {
+189 | 			JSONRPC string          `json:"jsonrpc"`
+190 | 			ID      *int64          `json:"id,omitempty"`
+191 | 			Method  string          `json:"method,omitempty"`
+192 | 			Result  json.RawMessage `json:"result,omitempty"`
+193 | 			Error   *struct {
+194 | 				Code    int    `json:"code"`
+195 | 				Message string `json:"message"`
+196 | 			} `json:"error,omitempty"`
+197 | 		}
+198 | 
+199 | 		if err := json.Unmarshal([]byte(data), &baseMessage); err != nil {
+200 | 			fmt.Printf("Error unmarshaling message: %v\n", err)
+201 | 			return
+202 | 		}
+203 | 
+204 | 		// Handle notification
+205 | 		if baseMessage.ID == nil {
+206 | 			var notification mcp.JSONRPCNotification
+207 | 			if err := json.Unmarshal([]byte(data), &notification); err != nil {
+208 | 				return
+209 | 			}
+210 | 			c.notifyMu.RLock()
+211 | 			for _, handler := range c.notifications {
+212 | 				handler(notification)
+213 | 			}
+214 | 			c.notifyMu.RUnlock()
+215 | 			return
+216 | 		}
+217 | 
+218 | 		c.mu.RLock()
+219 | 		ch, ok := c.responses[*baseMessage.ID]
+220 | 		c.mu.RUnlock()
+221 | 
+222 | 		if ok {
+223 | 			if baseMessage.Error != nil {
+224 | 				ch <- RPCResponse{
+225 | 					Error: &baseMessage.Error.Message,
+226 | 				}
+227 | 			} else {
+228 | 				ch <- RPCResponse{
+229 | 					Response: &baseMessage.Result,
+230 | 				}
+231 | 			}
+232 | 			c.mu.Lock()
+233 | 			delete(c.responses, *baseMessage.ID)
+234 | 			c.mu.Unlock()
+235 | 		}
+236 | 	}
+237 | }
+238 | 
+239 | // OnNotification registers a handler function to be called when notifications are received.
+240 | // Multiple handlers can be registered and will be called in the order they were added.
+241 | func (c *SSEMCPClient) OnNotification(
+242 | 	handler func(notification mcp.JSONRPCNotification),
+243 | ) {
+244 | 	c.notifyMu.Lock()
+245 | 	defer c.notifyMu.Unlock()
+246 | 	c.notifications = append(c.notifications, handler)
+247 | }
+248 | 
+249 | // sendRequest sends a JSON-RPC request to the server and waits for a response.
+250 | // Returns the raw JSON response message or an error if the request fails.
+251 | func (c *SSEMCPClient) sendRequest(
+252 | 	ctx context.Context,
+253 | 	method string,
+254 | 	params interface{},
+255 | ) (*json.RawMessage, error) {
+256 | 	if !c.initialized && method != "initialize" {
+257 | 		return nil, fmt.Errorf("client not initialized")
+258 | 	}
+259 | 
+260 | 	if c.endpoint == nil {
+261 | 		return nil, fmt.Errorf("endpoint not received")
+262 | 	}
+263 | 
+264 | 	id := c.requestID.Add(1)
+265 | 
+266 | 	request := mcp.JSONRPCRequest{
+267 | 		JSONRPC: mcp.JSONRPC_VERSION,
+268 | 		ID:      id,
+269 | 		Request: mcp.Request{
+270 | 			Method: method,
+271 | 		},
+272 | 		Params: params,
+273 | 	}
+274 | 
+275 | 	requestBytes, err := json.Marshal(request)
+276 | 	if err != nil {
+277 | 		return nil, fmt.Errorf("failed to marshal request: %w", err)
+278 | 	}
+279 | 
+280 | 	responseChan := make(chan RPCResponse, 1)
+281 | 	c.mu.Lock()
+282 | 	c.responses[id] = responseChan
+283 | 	c.mu.Unlock()
+284 | 
+285 | 	req, err := http.NewRequestWithContext(
+286 | 		ctx,
+287 | 		"POST",
+288 | 		c.endpoint.String(),
+289 | 		bytes.NewReader(requestBytes),
+290 | 	)
+291 | 	if err != nil {
+292 | 		return nil, fmt.Errorf("failed to create request: %w", err)
+293 | 	}
+294 | 
+295 | 	req.Header.Set("Content-Type", "application/json")
+296 | 	// set custom http headers
+297 | 	for k, v := range c.headers {
+298 | 		req.Header.Set(k, v)
+299 | 	}
+300 | 
+301 | 	resp, err := c.httpClient.Do(req)
+302 | 	if err != nil {
+303 | 		return nil, fmt.Errorf("failed to send request: %w", err)
+304 | 	}
+305 | 	defer resp.Body.Close()
+306 | 
+307 | 	if resp.StatusCode != http.StatusOK &&
+308 | 		resp.StatusCode != http.StatusAccepted {
+309 | 		body, _ := io.ReadAll(resp.Body)
+310 | 		return nil, fmt.Errorf(
+311 | 			"request failed with status %d: %s",
+312 | 			resp.StatusCode,
+313 | 			body,
+314 | 		)
+315 | 	}
+316 | 
+317 | 	select {
+318 | 	case <-ctx.Done():
+319 | 		c.mu.Lock()
+320 | 		delete(c.responses, id)
+321 | 		c.mu.Unlock()
+322 | 		return nil, ctx.Err()
+323 | 	case response := <-responseChan:
+324 | 		if response.Error != nil {
+325 | 			return nil, errors.New(*response.Error)
+326 | 		}
+327 | 		return response.Response, nil
+328 | 	}
+329 | }
+330 | 
+331 | func (c *SSEMCPClient) Initialize(
+332 | 	ctx context.Context,
+333 | 	request mcp.InitializeRequest,
+334 | ) (*mcp.InitializeResult, error) {
+335 | 	// Ensure we send a params object with all required fields
+336 | 	params := struct {
+337 | 		ProtocolVersion string                 `json:"protocolVersion"`
+338 | 		ClientInfo      mcp.Implementation     `json:"clientInfo"`
+339 | 		Capabilities    mcp.ClientCapabilities `json:"capabilities"`
+340 | 	}{
+341 | 		ProtocolVersion: request.Params.ProtocolVersion,
+342 | 		ClientInfo:      request.Params.ClientInfo,
+343 | 		Capabilities:    request.Params.Capabilities, // Will be empty struct if not set
+344 | 	}
+345 | 
+346 | 	response, err := c.sendRequest(ctx, "initialize", params)
+347 | 	if err != nil {
+348 | 		return nil, err
+349 | 	}
+350 | 
+351 | 	var result mcp.InitializeResult
+352 | 	if err := json.Unmarshal(*response, &result); err != nil {
+353 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+354 | 	}
+355 | 
+356 | 	// Store capabilities
+357 | 	c.capabilities = result.Capabilities
 358 | 
-359 | 	var result mcp.InitializeResult
-360 | 	if err := json.Unmarshal(*response, &result); err != nil {
-361 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-362 | 	}
-363 | 
-364 | 	// Store capabilities
-365 | 	c.capabilities = result.Capabilities
+359 | 	// Send initialized notification
+360 | 	notification := mcp.JSONRPCNotification{
+361 | 		JSONRPC: mcp.JSONRPC_VERSION,
+362 | 		Notification: mcp.Notification{
+363 | 			Method: "notifications/initialized",
+364 | 		},
+365 | 	}
 366 | 
-367 | 	// Send initialized notification
-368 | 	notification := mcp.JSONRPCNotification{
-369 | 		JSONRPC: mcp.JSONRPC_VERSION,
-370 | 		Notification: mcp.Notification{
-371 | 			Method: "notifications/initialized",
-372 | 		},
+367 | 	notificationBytes, err := json.Marshal(notification)
+368 | 	if err != nil {
+369 | 		return nil, fmt.Errorf(
+370 | 			"failed to marshal initialized notification: %w",
+371 | 			err,
+372 | 		)
 373 | 	}
 374 | 
-375 | 	notificationBytes, err := json.Marshal(notification)
-376 | 	if err != nil {
-377 | 		return nil, fmt.Errorf(
-378 | 			"failed to marshal initialized notification: %w",
-379 | 			err,
-380 | 		)
-381 | 	}
-382 | 
-383 | 	req, err := http.NewRequestWithContext(
-384 | 		ctx,
-385 | 		"POST",
-386 | 		c.endpoint.String(),
-387 | 		bytes.NewReader(notificationBytes),
-388 | 	)
-389 | 	if err != nil {
-390 | 		return nil, fmt.Errorf("failed to create notification request: %w", err)
-391 | 	}
-392 | 
-393 | 	req.Header.Set("Content-Type", "application/json")
-394 | 
-395 | 	resp, err := c.httpClient.Do(req)
-396 | 	if err != nil {
-397 | 		return nil, fmt.Errorf(
-398 | 			"failed to send initialized notification: %w",
-399 | 			err,
-400 | 		)
-401 | 	}
-402 | 	resp.Body.Close()
-403 | 
-404 | 	c.initialized = true
-405 | 	return &result, nil
-406 | }
-407 | 
-408 | func (c *SSEMCPClient) Ping(ctx context.Context) error {
-409 | 	_, err := c.sendRequest(ctx, "ping", nil)
-410 | 	return err
-411 | }
-412 | 
-413 | func (c *SSEMCPClient) ListResources(
-414 | 	ctx context.Context,
-415 | 	request mcp.ListResourcesRequest,
-416 | ) (*mcp.ListResourcesResult, error) {
-417 | 	response, err := c.sendRequest(ctx, "resources/list", request.Params)
-418 | 	if err != nil {
-419 | 		return nil, err
-420 | 	}
-421 | 
-422 | 	var result mcp.ListResourcesResult
-423 | 	if err := json.Unmarshal(*response, &result); err != nil {
-424 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-425 | 	}
-426 | 
-427 | 	return &result, nil
-428 | }
-429 | 
-430 | func (c *SSEMCPClient) ListResourceTemplates(
-431 | 	ctx context.Context,
-432 | 	request mcp.ListResourceTemplatesRequest,
-433 | ) (*mcp.ListResourceTemplatesResult, error) {
-434 | 	response, err := c.sendRequest(
-435 | 		ctx,
-436 | 		"resources/templates/list",
-437 | 		request.Params,
-438 | 	)
-439 | 	if err != nil {
-440 | 		return nil, err
-441 | 	}
-442 | 
-443 | 	var result mcp.ListResourceTemplatesResult
-444 | 	if err := json.Unmarshal(*response, &result); err != nil {
-445 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-446 | 	}
-447 | 
-448 | 	return &result, nil
-449 | }
-450 | 
-451 | func (c *SSEMCPClient) ReadResource(
-452 | 	ctx context.Context,
-453 | 	request mcp.ReadResourceRequest,
-454 | ) (*mcp.ReadResourceResult, error) {
-455 | 	response, err := c.sendRequest(ctx, "resources/read", request.Params)
-456 | 	if err != nil {
-457 | 		return nil, err
-458 | 	}
-459 | 
-460 | 	return mcp.ParseReadResourceResult(response)
-461 | }
-462 | 
-463 | func (c *SSEMCPClient) Subscribe(
-464 | 	ctx context.Context,
-465 | 	request mcp.SubscribeRequest,
-466 | ) error {
-467 | 	_, err := c.sendRequest(ctx, "resources/subscribe", request.Params)
-468 | 	return err
-469 | }
-470 | 
-471 | func (c *SSEMCPClient) Unsubscribe(
-472 | 	ctx context.Context,
-473 | 	request mcp.UnsubscribeRequest,
-474 | ) error {
-475 | 	_, err := c.sendRequest(ctx, "resources/unsubscribe", request.Params)
-476 | 	return err
-477 | }
-478 | 
-479 | func (c *SSEMCPClient) ListPrompts(
-480 | 	ctx context.Context,
-481 | 	request mcp.ListPromptsRequest,
-482 | ) (*mcp.ListPromptsResult, error) {
-483 | 	response, err := c.sendRequest(ctx, "prompts/list", request.Params)
-484 | 	if err != nil {
-485 | 		return nil, err
-486 | 	}
-487 | 
-488 | 	var result mcp.ListPromptsResult
-489 | 	if err := json.Unmarshal(*response, &result); err != nil {
-490 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-491 | 	}
-492 | 
-493 | 	return &result, nil
-494 | }
-495 | 
-496 | func (c *SSEMCPClient) GetPrompt(
-497 | 	ctx context.Context,
-498 | 	request mcp.GetPromptRequest,
-499 | ) (*mcp.GetPromptResult, error) {
-500 | 	response, err := c.sendRequest(ctx, "prompts/get", request.Params)
-501 | 	if err != nil {
-502 | 		return nil, err
-503 | 	}
-504 | 
-505 | 	return mcp.ParseGetPromptResult(response)
-506 | }
-507 | 
-508 | func (c *SSEMCPClient) ListTools(
-509 | 	ctx context.Context,
-510 | 	request mcp.ListToolsRequest,
-511 | ) (*mcp.ListToolsResult, error) {
-512 | 	response, err := c.sendRequest(ctx, "tools/list", request.Params)
-513 | 	if err != nil {
-514 | 		return nil, err
-515 | 	}
+375 | 	req, err := http.NewRequestWithContext(
+376 | 		ctx,
+377 | 		"POST",
+378 | 		c.endpoint.String(),
+379 | 		bytes.NewReader(notificationBytes),
+380 | 	)
+381 | 	if err != nil {
+382 | 		return nil, fmt.Errorf("failed to create notification request: %w", err)
+383 | 	}
+384 | 
+385 | 	req.Header.Set("Content-Type", "application/json")
+386 | 
+387 | 	resp, err := c.httpClient.Do(req)
+388 | 	if err != nil {
+389 | 		return nil, fmt.Errorf(
+390 | 			"failed to send initialized notification: %w",
+391 | 			err,
+392 | 		)
+393 | 	}
+394 | 	defer resp.Body.Close()
+395 | 
+396 | 	c.initialized = true
+397 | 	return &result, nil
+398 | }
+399 | 
+400 | func (c *SSEMCPClient) Ping(ctx context.Context) error {
+401 | 	_, err := c.sendRequest(ctx, "ping", nil)
+402 | 	return err
+403 | }
+404 | 
+405 | // ListResourcesByPage manually list resources by page.
+406 | func (c *SSEMCPClient) ListResourcesByPage(
+407 | 	ctx context.Context,
+408 | 	request mcp.ListResourcesRequest,
+409 | ) (*mcp.ListResourcesResult, error) {
+410 | 	result, err := listByPage[mcp.ListResourcesResult](ctx, c, request.PaginatedRequest, "resources/list")
+411 | 	if err != nil {
+412 | 		return nil, err
+413 | 	}
+414 | 	return result, nil
+415 | }
+416 | 
+417 | func (c *SSEMCPClient) ListResources(
+418 | 	ctx context.Context,
+419 | 	request mcp.ListResourcesRequest,
+420 | ) (*mcp.ListResourcesResult, error) {
+421 | 	result, err := c.ListResourcesByPage(ctx, request)
+422 | 	if err != nil {
+423 | 		return nil, err
+424 | 	}
+425 | 	for result.NextCursor != "" {
+426 | 		select {
+427 | 		case <-ctx.Done():
+428 | 			return nil, ctx.Err()
+429 | 		default:
+430 | 			request.Params.Cursor = result.NextCursor
+431 | 			newPageRes, err := c.ListResourcesByPage(ctx, request)
+432 | 			if err != nil {
+433 | 				return nil, err
+434 | 			}
+435 | 			result.Resources = append(result.Resources, newPageRes.Resources...)
+436 | 			result.NextCursor = newPageRes.NextCursor
+437 | 		}
+438 | 	}
+439 | 	return result, nil
+440 | }
+441 | 
+442 | func (c *SSEMCPClient) ListResourceTemplatesByPage(
+443 | 	ctx context.Context,
+444 | 	request mcp.ListResourceTemplatesRequest,
+445 | ) (*mcp.ListResourceTemplatesResult, error) {
+446 | 	result, err := listByPage[mcp.ListResourceTemplatesResult](ctx, c, request.PaginatedRequest, "resources/templates/list")
+447 | 	if err != nil {
+448 | 		return nil, err
+449 | 	}
+450 | 	return result, nil
+451 | }
+452 | 
+453 | func (c *SSEMCPClient) ListResourceTemplates(
+454 | 	ctx context.Context,
+455 | 	request mcp.ListResourceTemplatesRequest,
+456 | ) (*mcp.ListResourceTemplatesResult, error) {
+457 | 	result, err := c.ListResourceTemplatesByPage(ctx, request)
+458 | 	if err != nil {
+459 | 		return nil, err
+460 | 	}
+461 | 	for result.NextCursor != "" {
+462 | 		select {
+463 | 		case <-ctx.Done():
+464 | 			return nil, ctx.Err()
+465 | 		default:
+466 | 			request.Params.Cursor = result.NextCursor
+467 | 			newPageRes, err := c.ListResourceTemplatesByPage(ctx, request)
+468 | 			if err != nil {
+469 | 				return nil, err
+470 | 			}
+471 | 			result.ResourceTemplates = append(result.ResourceTemplates, newPageRes.ResourceTemplates...)
+472 | 			result.NextCursor = newPageRes.NextCursor
+473 | 		}
+474 | 	}
+475 | 	return result, nil
+476 | }
+477 | 
+478 | func (c *SSEMCPClient) ReadResource(
+479 | 	ctx context.Context,
+480 | 	request mcp.ReadResourceRequest,
+481 | ) (*mcp.ReadResourceResult, error) {
+482 | 	response, err := c.sendRequest(ctx, "resources/read", request.Params)
+483 | 	if err != nil {
+484 | 		return nil, err
+485 | 	}
+486 | 
+487 | 	return mcp.ParseReadResourceResult(response)
+488 | }
+489 | 
+490 | func (c *SSEMCPClient) Subscribe(
+491 | 	ctx context.Context,
+492 | 	request mcp.SubscribeRequest,
+493 | ) error {
+494 | 	_, err := c.sendRequest(ctx, "resources/subscribe", request.Params)
+495 | 	return err
+496 | }
+497 | 
+498 | func (c *SSEMCPClient) Unsubscribe(
+499 | 	ctx context.Context,
+500 | 	request mcp.UnsubscribeRequest,
+501 | ) error {
+502 | 	_, err := c.sendRequest(ctx, "resources/unsubscribe", request.Params)
+503 | 	return err
+504 | }
+505 | 
+506 | func (c *SSEMCPClient) ListPromptsByPage(
+507 | 	ctx context.Context,
+508 | 	request mcp.ListPromptsRequest,
+509 | ) (*mcp.ListPromptsResult, error) {
+510 | 	result, err := listByPage[mcp.ListPromptsResult](ctx, c, request.PaginatedRequest, "prompts/list")
+511 | 	if err != nil {
+512 | 		return nil, err
+513 | 	}
+514 | 	return result, nil
+515 | }
 516 | 
-517 | 	var result mcp.ListToolsResult
-518 | 	if err := json.Unmarshal(*response, &result); err != nil {
-519 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-520 | 	}
-521 | 
-522 | 	return &result, nil
-523 | }
-524 | 
-525 | func (c *SSEMCPClient) CallTool(
-526 | 	ctx context.Context,
-527 | 	request mcp.CallToolRequest,
-528 | ) (*mcp.CallToolResult, error) {
-529 | 	response, err := c.sendRequest(ctx, "tools/call", request.Params)
-530 | 	if err != nil {
-531 | 		return nil, err
-532 | 	}
-533 | 
-534 | 	return mcp.ParseCallToolResult(response)
-535 | }
-536 | 
-537 | func (c *SSEMCPClient) SetLevel(
-538 | 	ctx context.Context,
-539 | 	request mcp.SetLevelRequest,
-540 | ) error {
-541 | 	_, err := c.sendRequest(ctx, "logging/setLevel", request.Params)
-542 | 	return err
-543 | }
-544 | 
-545 | func (c *SSEMCPClient) Complete(
-546 | 	ctx context.Context,
-547 | 	request mcp.CompleteRequest,
-548 | ) (*mcp.CompleteResult, error) {
-549 | 	response, err := c.sendRequest(ctx, "completion/complete", request.Params)
-550 | 	if err != nil {
-551 | 		return nil, err
-552 | 	}
+517 | func (c *SSEMCPClient) ListPrompts(
+518 | 	ctx context.Context,
+519 | 	request mcp.ListPromptsRequest,
+520 | ) (*mcp.ListPromptsResult, error) {
+521 | 	result, err := c.ListPromptsByPage(ctx, request)
+522 | 	if err != nil {
+523 | 		return nil, err
+524 | 	}
+525 | 	for result.NextCursor != "" {
+526 | 		select {
+527 | 		case <-ctx.Done():
+528 | 			return nil, ctx.Err()
+529 | 		default:
+530 | 			request.Params.Cursor = result.NextCursor
+531 | 			newPageRes, err := c.ListPromptsByPage(ctx, request)
+532 | 			if err != nil {
+533 | 				return nil, err
+534 | 			}
+535 | 			result.Prompts = append(result.Prompts, newPageRes.Prompts...)
+536 | 			result.NextCursor = newPageRes.NextCursor
+537 | 		}
+538 | 	}
+539 | 	return result, nil
+540 | }
+541 | 
+542 | func (c *SSEMCPClient) GetPrompt(
+543 | 	ctx context.Context,
+544 | 	request mcp.GetPromptRequest,
+545 | ) (*mcp.GetPromptResult, error) {
+546 | 	response, err := c.sendRequest(ctx, "prompts/get", request.Params)
+547 | 	if err != nil {
+548 | 		return nil, err
+549 | 	}
+550 | 
+551 | 	return mcp.ParseGetPromptResult(response)
+552 | }
 553 | 
-554 | 	var result mcp.CompleteResult
-555 | 	if err := json.Unmarshal(*response, &result); err != nil {
-556 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-557 | 	}
-558 | 
-559 | 	return &result, nil
-560 | }
-561 | 
-562 | // Helper methods
-563 | 
-564 | // GetEndpoint returns the current endpoint URL for the SSE connection.
-565 | func (c *SSEMCPClient) GetEndpoint() *url.URL {
-566 | 	return c.endpoint
-567 | }
-568 | 
-569 | // Close shuts down the SSE client connection and cleans up any pending responses.
-570 | // Returns an error if the shutdown process fails.
-571 | func (c *SSEMCPClient) Close() error {
-572 | 	select {
-573 | 	case <-c.done:
-574 | 		return nil // Already closed
-575 | 	default:
-576 | 		close(c.done)
-577 | 	}
-578 | 
-579 | 	// Clean up any pending responses
-580 | 	c.mu.Lock()
-581 | 	for _, ch := range c.responses {
-582 | 		close(ch)
-583 | 	}
-584 | 	c.responses = make(map[int64]chan RPCResponse)
-585 | 	c.mu.Unlock()
-586 | 
-587 | 	return nil
+554 | func (c *SSEMCPClient) ListToolsByPage(
+555 | 	ctx context.Context,
+556 | 	request mcp.ListToolsRequest,
+557 | ) (*mcp.ListToolsResult, error) {
+558 | 	result, err := listByPage[mcp.ListToolsResult](ctx, c, request.PaginatedRequest, "tools/list")
+559 | 	if err != nil {
+560 | 		return nil, err
+561 | 	}
+562 | 	return result, nil
+563 | }
+564 | 
+565 | func (c *SSEMCPClient) ListTools(
+566 | 	ctx context.Context,
+567 | 	request mcp.ListToolsRequest,
+568 | ) (*mcp.ListToolsResult, error) {
+569 | 	result, err := c.ListToolsByPage(ctx, request)
+570 | 	if err != nil {
+571 | 		return nil, err
+572 | 	}
+573 | 	for result.NextCursor != "" {
+574 | 		select {
+575 | 		case <-ctx.Done():
+576 | 			return nil, ctx.Err()
+577 | 		default:
+578 | 			request.Params.Cursor = result.NextCursor
+579 | 			newPageRes, err := c.ListToolsByPage(ctx, request)
+580 | 			if err != nil {
+581 | 				return nil, err
+582 | 			}
+583 | 			result.Tools = append(result.Tools, newPageRes.Tools...)
+584 | 			result.NextCursor = newPageRes.NextCursor
+585 | 		}
+586 | 	}
+587 | 	return result, nil
 588 | }
 589 | 
+590 | func (c *SSEMCPClient) CallTool(
+591 | 	ctx context.Context,
+592 | 	request mcp.CallToolRequest,
+593 | ) (*mcp.CallToolResult, error) {
+594 | 	response, err := c.sendRequest(ctx, "tools/call", request.Params)
+595 | 	if err != nil {
+596 | 		return nil, err
+597 | 	}
+598 | 
+599 | 	return mcp.ParseCallToolResult(response)
+600 | }
+601 | 
+602 | func (c *SSEMCPClient) SetLevel(
+603 | 	ctx context.Context,
+604 | 	request mcp.SetLevelRequest,
+605 | ) error {
+606 | 	_, err := c.sendRequest(ctx, "logging/setLevel", request.Params)
+607 | 	return err
+608 | }
+609 | 
+610 | func (c *SSEMCPClient) Complete(
+611 | 	ctx context.Context,
+612 | 	request mcp.CompleteRequest,
+613 | ) (*mcp.CompleteResult, error) {
+614 | 	response, err := c.sendRequest(ctx, "completion/complete", request.Params)
+615 | 	if err != nil {
+616 | 		return nil, err
+617 | 	}
+618 | 
+619 | 	var result mcp.CompleteResult
+620 | 	if err := json.Unmarshal(*response, &result); err != nil {
+621 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+622 | 	}
+623 | 
+624 | 	return &result, nil
+625 | }
+626 | 
+627 | // Helper methods
+628 | 
+629 | // GetEndpoint returns the current endpoint URL for the SSE connection.
+630 | func (c *SSEMCPClient) GetEndpoint() *url.URL {
+631 | 	return c.endpoint
+632 | }
+633 | 
+634 | // Close shuts down the SSE client connection and cleans up any pending responses.
+635 | // Returns an error if the shutdown process fails.
+636 | func (c *SSEMCPClient) Close() error {
+637 | 	select {
+638 | 	case <-c.done:
+639 | 		return nil // Already closed
+640 | 	default:
+641 | 		close(c.done)
+642 | 	}
+643 | 
+644 | 	// Clean up any pending responses
+645 | 	c.mu.Lock()
+646 | 	for _, ch := range c.responses {
+647 | 		close(ch)
+648 | 	}
+649 | 	c.responses = make(map[int64]chan RPCResponse)
+650 | 	c.mu.Unlock()
+651 | 
+652 | 	return nil
+653 | }
+654 | 
 
 
 --------------------------------------------------------------------------------
@@ -1235,162 +1350,229 @@
 300 | 	return &result, nil
 301 | }
 302 | 
-303 | func (c *StdioMCPClient) ListResources(
-304 | 	ctx context.Context,
-305 | 	request mcp.ListResourcesRequest,
-306 | ) (*mcp.
-307 | 	ListResourcesResult, error) {
-308 | 	response, err := c.sendRequest(
-309 | 		ctx,
-310 | 		"resources/list",
-311 | 		request.Params,
-312 | 	)
-313 | 	if err != nil {
-314 | 		return nil, err
-315 | 	}
-316 | 
-317 | 	var result mcp.ListResourcesResult
-318 | 	if err := json.Unmarshal(*response, &result); err != nil {
-319 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-320 | 	}
-321 | 
-322 | 	return &result, nil
-323 | }
-324 | 
-325 | func (c *StdioMCPClient) ListResourceTemplates(
-326 | 	ctx context.Context,
-327 | 	request mcp.ListResourceTemplatesRequest,
-328 | ) (*mcp.
-329 | 	ListResourceTemplatesResult, error) {
-330 | 	response, err := c.sendRequest(
-331 | 		ctx,
-332 | 		"resources/templates/list",
-333 | 		request.Params,
-334 | 	)
-335 | 	if err != nil {
-336 | 		return nil, err
-337 | 	}
-338 | 
-339 | 	var result mcp.ListResourceTemplatesResult
-340 | 	if err := json.Unmarshal(*response, &result); err != nil {
-341 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-342 | 	}
-343 | 
-344 | 	return &result, nil
-345 | }
-346 | 
-347 | func (c *StdioMCPClient) ReadResource(
-348 | 	ctx context.Context,
-349 | 	request mcp.ReadResourceRequest,
-350 | ) (*mcp.ReadResourceResult,
-351 | 	error) {
-352 | 	response, err := c.sendRequest(ctx, "resources/read", request.Params)
-353 | 	if err != nil {
-354 | 		return nil, err
-355 | 	}
-356 | 
-357 | 	return mcp.ParseReadResourceResult(response)
-358 | }
-359 | 
-360 | func (c *StdioMCPClient) Subscribe(
-361 | 	ctx context.Context,
-362 | 	request mcp.SubscribeRequest,
-363 | ) error {
-364 | 	_, err := c.sendRequest(ctx, "resources/subscribe", request.Params)
-365 | 	return err
-366 | }
-367 | 
-368 | func (c *StdioMCPClient) Unsubscribe(
-369 | 	ctx context.Context,
-370 | 	request mcp.UnsubscribeRequest,
-371 | ) error {
-372 | 	_, err := c.sendRequest(ctx, "resources/unsubscribe", request.Params)
-373 | 	return err
+303 | // ListResourcesByPage manually list resources by page.
+304 | func (c *StdioMCPClient) ListResourcesByPage(
+305 | 	ctx context.Context,
+306 | 	request mcp.ListResourcesRequest,
+307 | ) (*mcp.ListResourcesResult, error) {
+308 | 	result, err := listByPage[mcp.ListResourcesResult](ctx, c, request.PaginatedRequest, "resources/list")
+309 | 	if err != nil {
+310 | 		return nil, err
+311 | 	}
+312 | 	return result, nil
+313 | }
+314 | 
+315 | func (c *StdioMCPClient) ListResources(
+316 | 	ctx context.Context,
+317 | 	request mcp.ListResourcesRequest,
+318 | ) (*mcp.ListResourcesResult, error) {
+319 | 	result, err := c.ListResourcesByPage(ctx, request)
+320 | 	if err != nil {
+321 | 		return nil, err
+322 | 	}
+323 | 	for result.NextCursor != "" {
+324 | 		select {
+325 | 		case <-ctx.Done():
+326 | 			return nil, ctx.Err()
+327 | 		default:
+328 | 			request.Params.Cursor = result.NextCursor
+329 | 			newPageRes, err := c.ListResourcesByPage(ctx, request)
+330 | 			if err != nil {
+331 | 				return nil, err
+332 | 			}
+333 | 			result.Resources = append(result.Resources, newPageRes.Resources...)
+334 | 			result.NextCursor = newPageRes.NextCursor
+335 | 		}
+336 | 	}
+337 | 	return result, nil
+338 | }
+339 | 
+340 | func (c *StdioMCPClient) ListResourceTemplatesByPage(
+341 | 	ctx context.Context,
+342 | 	request mcp.ListResourceTemplatesRequest,
+343 | ) (*mcp.ListResourceTemplatesResult, error) {
+344 | 	result, err := listByPage[mcp.ListResourceTemplatesResult](ctx, c, request.PaginatedRequest, "resources/templates/list")
+345 | 	if err != nil {
+346 | 		return nil, err
+347 | 	}
+348 | 	return result, nil
+349 | }
+350 | 
+351 | func (c *StdioMCPClient) ListResourceTemplates(
+352 | 	ctx context.Context,
+353 | 	request mcp.ListResourceTemplatesRequest,
+354 | ) (*mcp.ListResourceTemplatesResult, error) {
+355 | 	result, err := c.ListResourceTemplatesByPage(ctx, request)
+356 | 	if err != nil {
+357 | 		return nil, err
+358 | 	}
+359 | 	for result.NextCursor != "" {
+360 | 		select {
+361 | 		case <-ctx.Done():
+362 | 			return nil, ctx.Err()
+363 | 		default:
+364 | 			request.Params.Cursor = result.NextCursor
+365 | 			newPageRes, err := c.ListResourceTemplatesByPage(ctx, request)
+366 | 			if err != nil {
+367 | 				return nil, err
+368 | 			}
+369 | 			result.ResourceTemplates = append(result.ResourceTemplates, newPageRes.ResourceTemplates...)
+370 | 			result.NextCursor = newPageRes.NextCursor
+371 | 		}
+372 | 	}
+373 | 	return result, nil
 374 | }
 375 | 
-376 | func (c *StdioMCPClient) ListPrompts(
+376 | func (c *StdioMCPClient) ReadResource(
 377 | 	ctx context.Context,
-378 | 	request mcp.ListPromptsRequest,
-379 | ) (*mcp.ListPromptsResult, error) {
-380 | 	response, err := c.sendRequest(ctx, "prompts/list", request.Params)
-381 | 	if err != nil {
-382 | 		return nil, err
-383 | 	}
-384 | 
-385 | 	var result mcp.ListPromptsResult
-386 | 	if err := json.Unmarshal(*response, &result); err != nil {
-387 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-388 | 	}
-389 | 
-390 | 	return &result, nil
-391 | }
-392 | 
-393 | func (c *StdioMCPClient) GetPrompt(
-394 | 	ctx context.Context,
-395 | 	request mcp.GetPromptRequest,
-396 | ) (*mcp.GetPromptResult, error) {
-397 | 	response, err := c.sendRequest(ctx, "prompts/get", request.Params)
-398 | 	if err != nil {
-399 | 		return nil, err
-400 | 	}
-401 | 
-402 | 	return mcp.ParseGetPromptResult(response)
+378 | 	request mcp.ReadResourceRequest,
+379 | ) (*mcp.ReadResourceResult,
+380 | 	error) {
+381 | 	response, err := c.sendRequest(ctx, "resources/read", request.Params)
+382 | 	if err != nil {
+383 | 		return nil, err
+384 | 	}
+385 | 
+386 | 	return mcp.ParseReadResourceResult(response)
+387 | }
+388 | 
+389 | func (c *StdioMCPClient) Subscribe(
+390 | 	ctx context.Context,
+391 | 	request mcp.SubscribeRequest,
+392 | ) error {
+393 | 	_, err := c.sendRequest(ctx, "resources/subscribe", request.Params)
+394 | 	return err
+395 | }
+396 | 
+397 | func (c *StdioMCPClient) Unsubscribe(
+398 | 	ctx context.Context,
+399 | 	request mcp.UnsubscribeRequest,
+400 | ) error {
+401 | 	_, err := c.sendRequest(ctx, "resources/unsubscribe", request.Params)
+402 | 	return err
 403 | }
 404 | 
-405 | func (c *StdioMCPClient) ListTools(
+405 | func (c *StdioMCPClient) ListPromptsByPage(
 406 | 	ctx context.Context,
-407 | 	request mcp.ListToolsRequest,
-408 | ) (*mcp.ListToolsResult, error) {
-409 | 	response, err := c.sendRequest(ctx, "tools/list", request.Params)
+407 | 	request mcp.ListPromptsRequest,
+408 | ) (*mcp.ListPromptsResult, error) {
+409 | 	result, err := listByPage[mcp.ListPromptsResult](ctx, c, request.PaginatedRequest, "prompts/list")
 410 | 	if err != nil {
 411 | 		return nil, err
 412 | 	}
-413 | 
-414 | 	var result mcp.ListToolsResult
-415 | 	if err := json.Unmarshal(*response, &result); err != nil {
-416 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-417 | 	}
-418 | 
-419 | 	return &result, nil
-420 | }
-421 | 
-422 | func (c *StdioMCPClient) CallTool(
-423 | 	ctx context.Context,
-424 | 	request mcp.CallToolRequest,
-425 | ) (*mcp.CallToolResult, error) {
-426 | 	response, err := c.sendRequest(ctx, "tools/call", request.Params)
-427 | 	if err != nil {
-428 | 		return nil, err
-429 | 	}
-430 | 
-431 | 	return mcp.ParseCallToolResult(response)
-432 | }
-433 | 
-434 | func (c *StdioMCPClient) SetLevel(
-435 | 	ctx context.Context,
-436 | 	request mcp.SetLevelRequest,
-437 | ) error {
-438 | 	_, err := c.sendRequest(ctx, "logging/setLevel", request.Params)
-439 | 	return err
-440 | }
-441 | 
-442 | func (c *StdioMCPClient) Complete(
-443 | 	ctx context.Context,
-444 | 	request mcp.CompleteRequest,
-445 | ) (*mcp.CompleteResult, error) {
-446 | 	response, err := c.sendRequest(ctx, "completion/complete", request.Params)
-447 | 	if err != nil {
-448 | 		return nil, err
-449 | 	}
-450 | 
-451 | 	var result mcp.CompleteResult
-452 | 	if err := json.Unmarshal(*response, &result); err != nil {
-453 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-454 | 	}
-455 | 
-456 | 	return &result, nil
-457 | }
-458 | 
+413 | 	return result, nil
+414 | }
+415 | 
+416 | func (c *StdioMCPClient) ListPrompts(
+417 | 	ctx context.Context,
+418 | 	request mcp.ListPromptsRequest,
+419 | ) (*mcp.ListPromptsResult, error) {
+420 | 	result, err := c.ListPromptsByPage(ctx, request)
+421 | 	if err != nil {
+422 | 		return nil, err
+423 | 	}
+424 | 	for result.NextCursor != "" {
+425 | 		select {
+426 | 		case <-ctx.Done():
+427 | 			return nil, ctx.Err()
+428 | 		default:
+429 | 			request.Params.Cursor = result.NextCursor
+430 | 			newPageRes, err := c.ListPromptsByPage(ctx, request)
+431 | 			if err != nil {
+432 | 				return nil, err
+433 | 			}
+434 | 			result.Prompts = append(result.Prompts, newPageRes.Prompts...)
+435 | 			result.NextCursor = newPageRes.NextCursor
+436 | 		}
+437 | 	}
+438 | 	return result, nil
+439 | }
+440 | 
+441 | func (c *StdioMCPClient) GetPrompt(
+442 | 	ctx context.Context,
+443 | 	request mcp.GetPromptRequest,
+444 | ) (*mcp.GetPromptResult, error) {
+445 | 	response, err := c.sendRequest(ctx, "prompts/get", request.Params)
+446 | 	if err != nil {
+447 | 		return nil, err
+448 | 	}
+449 | 
+450 | 	return mcp.ParseGetPromptResult(response)
+451 | }
+452 | 
+453 | func (c *StdioMCPClient) ListToolsByPage(
+454 | 	ctx context.Context,
+455 | 	request mcp.ListToolsRequest,
+456 | ) (*mcp.ListToolsResult, error) {
+457 | 	result, err := listByPage[mcp.ListToolsResult](ctx, c, request.PaginatedRequest, "tools/list")
+458 | 	if err != nil {
+459 | 		return nil, err
+460 | 	}
+461 | 	return result, nil
+462 | }
+463 | 
+464 | func (c *StdioMCPClient) ListTools(
+465 | 	ctx context.Context,
+466 | 	request mcp.ListToolsRequest,
+467 | ) (*mcp.ListToolsResult, error) {
+468 | 	result, err := c.ListToolsByPage(ctx, request)
+469 | 	if err != nil {
+470 | 		return nil, err
+471 | 	}
+472 | 	for result.NextCursor != "" {
+473 | 		select {
+474 | 		case <-ctx.Done():
+475 | 			return nil, ctx.Err()
+476 | 		default:
+477 | 			request.Params.Cursor = result.NextCursor
+478 | 			newPageRes, err := c.ListToolsByPage(ctx, request)
+479 | 			if err != nil {
+480 | 				return nil, err
+481 | 			}
+482 | 			result.Tools = append(result.Tools, newPageRes.Tools...)
+483 | 			result.NextCursor = newPageRes.NextCursor
+484 | 		}
+485 | 	}
+486 | 	return result, nil
+487 | }
+488 | 
+489 | func (c *StdioMCPClient) CallTool(
+490 | 	ctx context.Context,
+491 | 	request mcp.CallToolRequest,
+492 | ) (*mcp.CallToolResult, error) {
+493 | 	response, err := c.sendRequest(ctx, "tools/call", request.Params)
+494 | 	if err != nil {
+495 | 		return nil, err
+496 | 	}
+497 | 
+498 | 	return mcp.ParseCallToolResult(response)
+499 | }
+500 | 
+501 | func (c *StdioMCPClient) SetLevel(
+502 | 	ctx context.Context,
+503 | 	request mcp.SetLevelRequest,
+504 | ) error {
+505 | 	_, err := c.sendRequest(ctx, "logging/setLevel", request.Params)
+506 | 	return err
+507 | }
+508 | 
+509 | func (c *StdioMCPClient) Complete(
+510 | 	ctx context.Context,
+511 | 	request mcp.CompleteRequest,
+512 | ) (*mcp.CompleteResult, error) {
+513 | 	response, err := c.sendRequest(ctx, "completion/complete", request.Params)
+514 | 	if err != nil {
+515 | 		return nil, err
+516 | 	}
+517 | 
+518 | 	var result mcp.CompleteResult
+519 | 	if err := json.Unmarshal(*response, &result); err != nil {
+520 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+521 | 	}
+522 | 
+523 | 	return &result, nil
+524 | }
+525 | 
 
 
 --------------------------------------------------------------------------------
