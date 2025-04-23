@@ -3,7 +3,7 @@ module github.com/akihiro-fukuchi/langchaingo-mcp-adapters
 go 1.24.1
 
 require (
-	github.com/mark3labs/mcp-go v0.20.0
+	github.com/mark3labs/mcp-go v0.23.1
 	github.com/ovechkin-dm/mockio v1.0.2
 	github.com/stretchr/testify v1.10.0
 	github.com/tmc/langchaingo v0.1.13
@@ -40,7 +40,7 @@ require (
 	github.com/stretchr/objx v0.5.2 // indirect
 	github.com/yargevad/filepathx v1.0.0 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
-	go.starlark.net v0.0.0-20250318223901-d9371fef63fe // indirect
+	go.starlark.net v0.0.0-20250417143717-f57e51f710eb // indirect
 	golang.org/x/crypto v0.37.0 // indirect
 	golang.org/x/exp v0.0.0-20250408133849-7e4ce0ab07d0 // indirect
 	golang.org/x/sys v0.32.0 // indirect

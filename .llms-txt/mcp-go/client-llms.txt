@@ -1,808 +1,1068 @@
 └── client
     ├── client.go
+    ├── http.go
+    ├── inprocess.go
+    ├── inprocess_test.go
+    ├── interface.go
     ├── sse.go
     ├── sse_test.go
     ├── stdio.go
     ├── stdio_test.go
-    └── types.go
+    └── transport
+        ├── inprocess.go
+        ├── interface.go
+        ├── sse.go
+        ├── sse_test.go
+        ├── stdio.go
+        ├── stdio_test.go
+        ├── streamable_http.go
+        └── streamable_http_test.go
 
 
 /client/client.go:
+--------------------------------------------------------------------------------
+  1 | package client
+  2 | 
+  3 | import (
+  4 | 	"context"
+  5 | 	"encoding/json"
+  6 | 	"errors"
+  7 | 	"fmt"
+  8 | 	"sync"
+  9 | 	"sync/atomic"
+ 10 | 
+ 11 | 	"github.com/mark3labs/mcp-go/client/transport"
+ 12 | 	"github.com/mark3labs/mcp-go/mcp"
+ 13 | )
+ 14 | 
+ 15 | // Client implements the MCP client.
+ 16 | type Client struct {
+ 17 | 	transport transport.Interface
+ 18 | 
+ 19 | 	initialized        bool
+ 20 | 	notifications      []func(mcp.JSONRPCNotification)
+ 21 | 	notifyMu           sync.RWMutex
+ 22 | 	requestID          atomic.Int64
+ 23 | 	clientCapabilities mcp.ClientCapabilities
+ 24 | 	serverCapabilities mcp.ServerCapabilities
+ 25 | }
+ 26 | 
+ 27 | type ClientOption func(*Client)
+ 28 | 
+ 29 | // WithClientCapabilities sets the client capabilities for the client.
+ 30 | func WithClientCapabilities(capabilities mcp.ClientCapabilities) ClientOption {
+ 31 | 	return func(c *Client) {
+ 32 | 		c.clientCapabilities = capabilities
+ 33 | 	}
+ 34 | }
+ 35 | 
+ 36 | // NewClient creates a new MCP client with the given transport.
+ 37 | // Usage:
+ 38 | //
+ 39 | //	stdio := transport.NewStdio("./mcp_server", nil, "xxx")
+ 40 | //	client, err := NewClient(stdio)
+ 41 | //	if err != nil {
+ 42 | //	    log.Fatalf("Failed to create client: %v", err)
+ 43 | //	}
+ 44 | func NewClient(transport transport.Interface, options ...ClientOption) *Client {
+ 45 | 	client := &Client{
+ 46 | 		transport: transport,
+ 47 | 	}
+ 48 | 
+ 49 | 	for _, opt := range options {
+ 50 | 		opt(client)
+ 51 | 	}
+ 52 | 
+ 53 | 	return client
+ 54 | }
+ 55 | 
+ 56 | // Start initiates the connection to the server.
+ 57 | // Must be called before using the client.
+ 58 | func (c *Client) Start(ctx context.Context) error {
+ 59 | 	if c.transport == nil {
+ 60 | 		return fmt.Errorf("transport is nil")
+ 61 | 	}
+ 62 | 	err := c.transport.Start(ctx)
+ 63 | 	if err != nil {
+ 64 | 		return err
+ 65 | 	}
+ 66 | 
+ 67 | 	c.transport.SetNotificationHandler(func(notification mcp.JSONRPCNotification) {
+ 68 | 		c.notifyMu.RLock()
+ 69 | 		defer c.notifyMu.RUnlock()
+ 70 | 		for _, handler := range c.notifications {
+ 71 | 			handler(notification)
+ 72 | 		}
+ 73 | 	})
+ 74 | 	return nil
+ 75 | }
+ 76 | 
+ 77 | // Close shuts down the client and closes the transport.
+ 78 | func (c *Client) Close() error {
+ 79 | 	return c.transport.Close()
+ 80 | }
+ 81 | 
+ 82 | // OnNotification registers a handler function to be called when notifications are received.
+ 83 | // Multiple handlers can be registered and will be called in the order they were added.
+ 84 | func (c *Client) OnNotification(
+ 85 | 	handler func(notification mcp.JSONRPCNotification),
+ 86 | ) {
+ 87 | 	c.notifyMu.Lock()
+ 88 | 	defer c.notifyMu.Unlock()
+ 89 | 	c.notifications = append(c.notifications, handler)
+ 90 | }
+ 91 | 
+ 92 | // sendRequest sends a JSON-RPC request to the server and waits for a response.
+ 93 | // Returns the raw JSON response message or an error if the request fails.
+ 94 | func (c *Client) sendRequest(
+ 95 | 	ctx context.Context,
+ 96 | 	method string,
+ 97 | 	params interface{},
+ 98 | ) (*json.RawMessage, error) {
+ 99 | 	if !c.initialized && method != "initialize" {
+100 | 		return nil, fmt.Errorf("client not initialized")
+101 | 	}
+102 | 
+103 | 	id := c.requestID.Add(1)
+104 | 
+105 | 	request := transport.JSONRPCRequest{
+106 | 		JSONRPC: mcp.JSONRPC_VERSION,
+107 | 		ID:      id,
+108 | 		Method:  method,
+109 | 		Params:  params,
+110 | 	}
+111 | 
+112 | 	response, err := c.transport.SendRequest(ctx, request)
+113 | 	if err != nil {
+114 | 		return nil, fmt.Errorf("transport error: %w", err)
+115 | 	}
+116 | 
+117 | 	if response.Error != nil {
+118 | 		return nil, errors.New(response.Error.Message)
+119 | 	}
+120 | 
+121 | 	return &response.Result, nil
+122 | }
+123 | 
+124 | // Initialize negotiates with the server.
+125 | // Must be called after Start, and before any request methods.
+126 | func (c *Client) Initialize(
+127 | 	ctx context.Context,
+128 | 	request mcp.InitializeRequest,
+129 | ) (*mcp.InitializeResult, error) {
+130 | 	// Ensure we send a params object with all required fields
+131 | 	params := struct {
+132 | 		ProtocolVersion string                 `json:"protocolVersion"`
+133 | 		ClientInfo      mcp.Implementation     `json:"clientInfo"`
+134 | 		Capabilities    mcp.ClientCapabilities `json:"capabilities"`
+135 | 	}{
+136 | 		ProtocolVersion: request.Params.ProtocolVersion,
+137 | 		ClientInfo:      request.Params.ClientInfo,
+138 | 		Capabilities:    request.Params.Capabilities, // Will be empty struct if not set
+139 | 	}
+140 | 
+141 | 	response, err := c.sendRequest(ctx, "initialize", params)
+142 | 	if err != nil {
+143 | 		return nil, err
+144 | 	}
+145 | 
+146 | 	var result mcp.InitializeResult
+147 | 	if err := json.Unmarshal(*response, &result); err != nil {
+148 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+149 | 	}
+150 | 
+151 | 	// Store serverCapabilities
+152 | 	c.serverCapabilities = result.Capabilities
+153 | 
+154 | 	// Send initialized notification
+155 | 	notification := mcp.JSONRPCNotification{
+156 | 		JSONRPC: mcp.JSONRPC_VERSION,
+157 | 		Notification: mcp.Notification{
+158 | 			Method: "notifications/initialized",
+159 | 		},
+160 | 	}
+161 | 
+162 | 	err = c.transport.SendNotification(ctx, notification)
+163 | 	if err != nil {
+164 | 		return nil, fmt.Errorf(
+165 | 			"failed to send initialized notification: %w",
+166 | 			err,
+167 | 		)
+168 | 	}
+169 | 
+170 | 	c.initialized = true
+171 | 	return &result, nil
+172 | }
+173 | 
+174 | func (c *Client) Ping(ctx context.Context) error {
+175 | 	_, err := c.sendRequest(ctx, "ping", nil)
+176 | 	return err
+177 | }
+178 | 
+179 | // ListResourcesByPage manually list resources by page.
+180 | func (c *Client) ListResourcesByPage(
+181 | 	ctx context.Context,
+182 | 	request mcp.ListResourcesRequest,
+183 | ) (*mcp.ListResourcesResult, error) {
+184 | 	result, err := listByPage[mcp.ListResourcesResult](ctx, c, request.PaginatedRequest, "resources/list")
+185 | 	if err != nil {
+186 | 		return nil, err
+187 | 	}
+188 | 	return result, nil
+189 | }
+190 | 
+191 | func (c *Client) ListResources(
+192 | 	ctx context.Context,
+193 | 	request mcp.ListResourcesRequest,
+194 | ) (*mcp.ListResourcesResult, error) {
+195 | 	result, err := c.ListResourcesByPage(ctx, request)
+196 | 	if err != nil {
+197 | 		return nil, err
+198 | 	}
+199 | 	for result.NextCursor != "" {
+200 | 		select {
+201 | 		case <-ctx.Done():
+202 | 			return nil, ctx.Err()
+203 | 		default:
+204 | 			request.Params.Cursor = result.NextCursor
+205 | 			newPageRes, err := c.ListResourcesByPage(ctx, request)
+206 | 			if err != nil {
+207 | 				return nil, err
+208 | 			}
+209 | 			result.Resources = append(result.Resources, newPageRes.Resources...)
+210 | 			result.NextCursor = newPageRes.NextCursor
+211 | 		}
+212 | 	}
+213 | 	return result, nil
+214 | }
+215 | 
+216 | func (c *Client) ListResourceTemplatesByPage(
+217 | 	ctx context.Context,
+218 | 	request mcp.ListResourceTemplatesRequest,
+219 | ) (*mcp.ListResourceTemplatesResult, error) {
+220 | 	result, err := listByPage[mcp.ListResourceTemplatesResult](ctx, c, request.PaginatedRequest, "resources/templates/list")
+221 | 	if err != nil {
+222 | 		return nil, err
+223 | 	}
+224 | 	return result, nil
+225 | }
+226 | 
+227 | func (c *Client) ListResourceTemplates(
+228 | 	ctx context.Context,
+229 | 	request mcp.ListResourceTemplatesRequest,
+230 | ) (*mcp.ListResourceTemplatesResult, error) {
+231 | 	result, err := c.ListResourceTemplatesByPage(ctx, request)
+232 | 	if err != nil {
+233 | 		return nil, err
+234 | 	}
+235 | 	for result.NextCursor != "" {
+236 | 		select {
+237 | 		case <-ctx.Done():
+238 | 			return nil, ctx.Err()
+239 | 		default:
+240 | 			request.Params.Cursor = result.NextCursor
+241 | 			newPageRes, err := c.ListResourceTemplatesByPage(ctx, request)
+242 | 			if err != nil {
+243 | 				return nil, err
+244 | 			}
+245 | 			result.ResourceTemplates = append(result.ResourceTemplates, newPageRes.ResourceTemplates...)
+246 | 			result.NextCursor = newPageRes.NextCursor
+247 | 		}
+248 | 	}
+249 | 	return result, nil
+250 | }
+251 | 
+252 | func (c *Client) ReadResource(
+253 | 	ctx context.Context,
+254 | 	request mcp.ReadResourceRequest,
+255 | ) (*mcp.ReadResourceResult, error) {
+256 | 	response, err := c.sendRequest(ctx, "resources/read", request.Params)
+257 | 	if err != nil {
+258 | 		return nil, err
+259 | 	}
+260 | 
+261 | 	return mcp.ParseReadResourceResult(response)
+262 | }
+263 | 
+264 | func (c *Client) Subscribe(
+265 | 	ctx context.Context,
+266 | 	request mcp.SubscribeRequest,
+267 | ) error {
+268 | 	_, err := c.sendRequest(ctx, "resources/subscribe", request.Params)
+269 | 	return err
+270 | }
+271 | 
+272 | func (c *Client) Unsubscribe(
+273 | 	ctx context.Context,
+274 | 	request mcp.UnsubscribeRequest,
+275 | ) error {
+276 | 	_, err := c.sendRequest(ctx, "resources/unsubscribe", request.Params)
+277 | 	return err
+278 | }
+279 | 
+280 | func (c *Client) ListPromptsByPage(
+281 | 	ctx context.Context,
+282 | 	request mcp.ListPromptsRequest,
+283 | ) (*mcp.ListPromptsResult, error) {
+284 | 	result, err := listByPage[mcp.ListPromptsResult](ctx, c, request.PaginatedRequest, "prompts/list")
+285 | 	if err != nil {
+286 | 		return nil, err
+287 | 	}
+288 | 	return result, nil
+289 | }
+290 | 
+291 | func (c *Client) ListPrompts(
+292 | 	ctx context.Context,
+293 | 	request mcp.ListPromptsRequest,
+294 | ) (*mcp.ListPromptsResult, error) {
+295 | 	result, err := c.ListPromptsByPage(ctx, request)
+296 | 	if err != nil {
+297 | 		return nil, err
+298 | 	}
+299 | 	for result.NextCursor != "" {
+300 | 		select {
+301 | 		case <-ctx.Done():
+302 | 			return nil, ctx.Err()
+303 | 		default:
+304 | 			request.Params.Cursor = result.NextCursor
+305 | 			newPageRes, err := c.ListPromptsByPage(ctx, request)
+306 | 			if err != nil {
+307 | 				return nil, err
+308 | 			}
+309 | 			result.Prompts = append(result.Prompts, newPageRes.Prompts...)
+310 | 			result.NextCursor = newPageRes.NextCursor
+311 | 		}
+312 | 	}
+313 | 	return result, nil
+314 | }
+315 | 
+316 | func (c *Client) GetPrompt(
+317 | 	ctx context.Context,
+318 | 	request mcp.GetPromptRequest,
+319 | ) (*mcp.GetPromptResult, error) {
+320 | 	response, err := c.sendRequest(ctx, "prompts/get", request.Params)
+321 | 	if err != nil {
+322 | 		return nil, err
+323 | 	}
+324 | 
+325 | 	return mcp.ParseGetPromptResult(response)
+326 | }
+327 | 
+328 | func (c *Client) ListToolsByPage(
+329 | 	ctx context.Context,
+330 | 	request mcp.ListToolsRequest,
+331 | ) (*mcp.ListToolsResult, error) {
+332 | 	result, err := listByPage[mcp.ListToolsResult](ctx, c, request.PaginatedRequest, "tools/list")
+333 | 	if err != nil {
+334 | 		return nil, err
+335 | 	}
+336 | 	return result, nil
+337 | }
+338 | 
+339 | func (c *Client) ListTools(
+340 | 	ctx context.Context,
+341 | 	request mcp.ListToolsRequest,
+342 | ) (*mcp.ListToolsResult, error) {
+343 | 	result, err := c.ListToolsByPage(ctx, request)
+344 | 	if err != nil {
+345 | 		return nil, err
+346 | 	}
+347 | 	for result.NextCursor != "" {
+348 | 		select {
+349 | 		case <-ctx.Done():
+350 | 			return nil, ctx.Err()
+351 | 		default:
+352 | 			request.Params.Cursor = result.NextCursor
+353 | 			newPageRes, err := c.ListToolsByPage(ctx, request)
+354 | 			if err != nil {
+355 | 				return nil, err
+356 | 			}
+357 | 			result.Tools = append(result.Tools, newPageRes.Tools...)
+358 | 			result.NextCursor = newPageRes.NextCursor
+359 | 		}
+360 | 	}
+361 | 	return result, nil
+362 | }
+363 | 
+364 | func (c *Client) CallTool(
+365 | 	ctx context.Context,
+366 | 	request mcp.CallToolRequest,
+367 | ) (*mcp.CallToolResult, error) {
+368 | 	response, err := c.sendRequest(ctx, "tools/call", request.Params)
+369 | 	if err != nil {
+370 | 		return nil, err
+371 | 	}
+372 | 
+373 | 	return mcp.ParseCallToolResult(response)
+374 | }
+375 | 
+376 | func (c *Client) SetLevel(
+377 | 	ctx context.Context,
+378 | 	request mcp.SetLevelRequest,
+379 | ) error {
+380 | 	_, err := c.sendRequest(ctx, "logging/setLevel", request.Params)
+381 | 	return err
+382 | }
+383 | 
+384 | func (c *Client) Complete(
+385 | 	ctx context.Context,
+386 | 	request mcp.CompleteRequest,
+387 | ) (*mcp.CompleteResult, error) {
+388 | 	response, err := c.sendRequest(ctx, "completion/complete", request.Params)
+389 | 	if err != nil {
+390 | 		return nil, err
+391 | 	}
+392 | 
+393 | 	var result mcp.CompleteResult
+394 | 	if err := json.Unmarshal(*response, &result); err != nil {
+395 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+396 | 	}
+397 | 
+398 | 	return &result, nil
+399 | }
+400 | 
+401 | func listByPage[T any](
+402 | 	ctx context.Context,
+403 | 	client *Client,
+404 | 	request mcp.PaginatedRequest,
+405 | 	method string,
+406 | ) (*T, error) {
+407 | 	response, err := client.sendRequest(ctx, method, request.Params)
+408 | 	if err != nil {
+409 | 		return nil, err
+410 | 	}
+411 | 	var result T
+412 | 	if err := json.Unmarshal(*response, &result); err != nil {
+413 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+414 | 	}
+415 | 	return &result, nil
+416 | }
+417 | 
+418 | // Helper methods
+419 | 
+420 | // GetTransport gives access to the underlying transport layer.
+421 | // Cast it to the specific transport type and obtain the other helper methods.
+422 | func (c *Client) GetTransport() transport.Interface {
+423 | 	return c.transport
+424 | }
+425 | 
+426 | // GetServerCapabilities returns the server capabilities.
+427 | func (c *Client) GetServerCapabilities() mcp.ServerCapabilities {
+428 | 	return c.serverCapabilities
+429 | }
+430 | 
+431 | // GetClientCapabilities returns the client capabilities.
+432 | func (c *Client) GetClientCapabilities() mcp.ClientCapabilities {
+433 | 	return c.clientCapabilities
+434 | }
+435 | 
+
+
+--------------------------------------------------------------------------------
+/client/http.go:
+--------------------------------------------------------------------------------
+ 1 | package client
+ 2 | 
+ 3 | import (
+ 4 | 	"fmt"
+ 5 | 
+ 6 | 	"github.com/mark3labs/mcp-go/client/transport"
+ 7 | )
+ 8 | 
+ 9 | // NewStreamableHttpClient is a convenience method that creates a new streamable-http-based MCP client
+10 | // with the given base URL. Returns an error if the URL is invalid.
+11 | func NewStreamableHttpClient(baseURL string, options ...transport.StreamableHTTPCOption) (*Client, error) {
+12 | 	trans, err := transport.NewStreamableHTTP(baseURL, options...)
+13 | 	if err != nil {
+14 | 		return nil, fmt.Errorf("failed to create SSE transport: %w", err)
+15 | 	}
+16 | 	return NewClient(trans), nil
+17 | }
+18 | 
+
+
+--------------------------------------------------------------------------------
+/client/inprocess.go:
+--------------------------------------------------------------------------------
+ 1 | package client
+ 2 | 
+ 3 | import (
+ 4 | 	"github.com/mark3labs/mcp-go/client/transport"
+ 5 | 	"github.com/mark3labs/mcp-go/server"
+ 6 | )
+ 7 | 
+ 8 | // NewInProcessClient connect directly to a mcp server object in the same process
+ 9 | func NewInProcessClient(server *server.MCPServer) (*Client, error) {
+10 | 	inProcessTransport := transport.NewInProcessTransport(server)
+11 | 	return NewClient(inProcessTransport), nil
+12 | }
+13 | 
+
+
+--------------------------------------------------------------------------------
+/client/inprocess_test.go:
+--------------------------------------------------------------------------------
+  1 | package client
+  2 | 
+  3 | import (
+  4 | 	"context"
+  5 | 	"testing"
+  6 | 
+  7 | 	"github.com/mark3labs/mcp-go/mcp"
+  8 | 	"github.com/mark3labs/mcp-go/server"
+  9 | )
+ 10 | 
+ 11 | func TestInProcessMCPClient(t *testing.T) {
+ 12 | 	mcpServer := server.NewMCPServer(
+ 13 | 		"test-server",
+ 14 | 		"1.0.0",
+ 15 | 		server.WithResourceCapabilities(true, true),
+ 16 | 		server.WithPromptCapabilities(true),
+ 17 | 		server.WithToolCapabilities(true),
+ 18 | 	)
+ 19 | 
+ 20 | 	// Add a test tool
+ 21 | 	mcpServer.AddTool(mcp.NewTool(
+ 22 | 		"test-tool",
+ 23 | 		mcp.WithDescription("Test tool"),
+ 24 | 		mcp.WithString("parameter-1", mcp.Description("A string tool parameter")),
+ 25 | 		mcp.WithToolAnnotation(mcp.ToolAnnotation{
+ 26 | 			Title:           "Test Tool Annotation Title",
+ 27 | 			ReadOnlyHint:    true,
+ 28 | 			DestructiveHint: false,
+ 29 | 			IdempotentHint:  true,
+ 30 | 			OpenWorldHint:   false,
+ 31 | 		}),
+ 32 | 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+ 33 | 		return &mcp.CallToolResult{
+ 34 | 			Content: []mcp.Content{
+ 35 | 				mcp.TextContent{
+ 36 | 					Type: "text",
+ 37 | 					Text: "Input parameter: " + request.Params.Arguments["parameter-1"].(string),
+ 38 | 				},
+ 39 | 			},
+ 40 | 		}, nil
+ 41 | 	})
+ 42 | 
+ 43 | 	mcpServer.AddResource(
+ 44 | 		mcp.Resource{
+ 45 | 			URI:  "resource://testresource",
+ 46 | 			Name: "My Resource",
+ 47 | 		},
+ 48 | 		func(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+ 49 | 			return []mcp.ResourceContents{
+ 50 | 				mcp.TextResourceContents{
+ 51 | 					URI:      "resource://testresource",
+ 52 | 					MIMEType: "text/plain",
+ 53 | 					Text:     "test content",
+ 54 | 				},
+ 55 | 			}, nil
+ 56 | 		},
+ 57 | 	)
+ 58 | 
+ 59 | 	mcpServer.AddPrompt(
+ 60 | 		mcp.Prompt{
+ 61 | 			Name:        "test-prompt",
+ 62 | 			Description: "A test prompt",
+ 63 | 			Arguments: []mcp.PromptArgument{
+ 64 | 				{
+ 65 | 					Name:        "arg1",
+ 66 | 					Description: "First argument",
+ 67 | 				},
+ 68 | 			},
+ 69 | 		},
+ 70 | 		func(ctx context.Context, request mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+ 71 | 			return &mcp.GetPromptResult{
+ 72 | 				Messages: []mcp.PromptMessage{
+ 73 | 					{
+ 74 | 						Role: mcp.RoleAssistant,
+ 75 | 						Content: mcp.TextContent{
+ 76 | 							Type: "text",
+ 77 | 							Text: "Test prompt with arg1: " + request.Params.Arguments["arg1"],
+ 78 | 						},
+ 79 | 					},
+ 80 | 				},
+ 81 | 			}, nil
+ 82 | 		},
+ 83 | 	)
+ 84 | 
+ 85 | 	t.Run("Can initialize and make requests", func(t *testing.T) {
+ 86 | 		client, err := NewInProcessClient(mcpServer)
+ 87 | 		if err != nil {
+ 88 | 			t.Fatalf("Failed to create client: %v", err)
+ 89 | 		}
+ 90 | 		defer client.Close()
+ 91 | 
+ 92 | 		// Start the client
+ 93 | 		if err := client.Start(context.Background()); err != nil {
+ 94 | 			t.Fatalf("Failed to start client: %v", err)
+ 95 | 		}
+ 96 | 
+ 97 | 		// Initialize
+ 98 | 		initRequest := mcp.InitializeRequest{}
+ 99 | 		initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+100 | 		initRequest.Params.ClientInfo = mcp.Implementation{
+101 | 			Name:    "test-client",
+102 | 			Version: "1.0.0",
+103 | 		}
+104 | 
+105 | 		result, err := client.Initialize(context.Background(), initRequest)
+106 | 		if err != nil {
+107 | 			t.Fatalf("Failed to initialize: %v", err)
+108 | 		}
+109 | 
+110 | 		if result.ServerInfo.Name != "test-server" {
+111 | 			t.Errorf(
+112 | 				"Expected server name 'test-server', got '%s'",
+113 | 				result.ServerInfo.Name,
+114 | 			)
+115 | 		}
+116 | 
+117 | 		// Test Ping
+118 | 		if err := client.Ping(context.Background()); err != nil {
+119 | 			t.Errorf("Ping failed: %v", err)
+120 | 		}
+121 | 
+122 | 		// Test ListTools
+123 | 		toolsRequest := mcp.ListToolsRequest{}
+124 | 		toolListResult, err := client.ListTools(context.Background(), toolsRequest)
+125 | 		if err != nil {
+126 | 			t.Errorf("ListTools failed: %v", err)
+127 | 		}
+128 | 		if toolListResult == nil || len((*toolListResult).Tools) == 0 {
+129 | 			t.Errorf("Expected one tool")
+130 | 		}
+131 | 		testToolAnnotations := (*toolListResult).Tools[0].Annotations
+132 | 		if testToolAnnotations.Title != "Test Tool Annotation Title" ||
+133 | 			testToolAnnotations.ReadOnlyHint != true ||
+134 | 			testToolAnnotations.DestructiveHint != false ||
+135 | 			testToolAnnotations.IdempotentHint != true ||
+136 | 			testToolAnnotations.OpenWorldHint != false {
+137 | 			t.Errorf("The annotations of the tools are invalid")
+138 | 		}
+139 | 	})
+140 | 
+141 | 	t.Run("Handles errors properly", func(t *testing.T) {
+142 | 		client, err := NewInProcessClient(mcpServer)
+143 | 		if err != nil {
+144 | 			t.Fatalf("Failed to create client: %v", err)
+145 | 		}
+146 | 		defer client.Close()
+147 | 
+148 | 		if err := client.Start(context.Background()); err != nil {
+149 | 			t.Fatalf("Failed to start client: %v", err)
+150 | 		}
+151 | 
+152 | 		// Try to make a request without initializing
+153 | 		toolsRequest := mcp.ListToolsRequest{}
+154 | 		_, err = client.ListTools(context.Background(), toolsRequest)
+155 | 		if err == nil {
+156 | 			t.Error("Expected error when making request before initialization")
+157 | 		}
+158 | 	})
+159 | 
+160 | 	t.Run("CallTool", func(t *testing.T) {
+161 | 		client, err := NewInProcessClient(mcpServer)
+162 | 		if err != nil {
+163 | 			t.Fatalf("Failed to create client: %v", err)
+164 | 		}
+165 | 		defer client.Close()
+166 | 
+167 | 		if err := client.Start(context.Background()); err != nil {
+168 | 			t.Fatalf("Failed to start client: %v", err)
+169 | 		}
+170 | 
+171 | 		// Initialize
+172 | 		initRequest := mcp.InitializeRequest{}
+173 | 		initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+174 | 		initRequest.Params.ClientInfo = mcp.Implementation{
+175 | 			Name:    "test-client",
+176 | 			Version: "1.0.0",
+177 | 		}
+178 | 
+179 | 		_, err = client.Initialize(context.Background(), initRequest)
+180 | 		if err != nil {
+181 | 			t.Fatalf("Failed to initialize: %v", err)
+182 | 		}
+183 | 
+184 | 		request := mcp.CallToolRequest{}
+185 | 		request.Params.Name = "test-tool"
+186 | 		request.Params.Arguments = map[string]interface{}{
+187 | 			"parameter-1": "value1",
+188 | 		}
+189 | 
+190 | 		result, err := client.CallTool(context.Background(), request)
+191 | 		if err != nil {
+192 | 			t.Fatalf("CallTool failed: %v", err)
+193 | 		}
+194 | 
+195 | 		if len(result.Content) != 1 {
+196 | 			t.Errorf("Expected 1 content item, got %d", len(result.Content))
+197 | 		}
+198 | 	})
+199 | 
+200 | 	t.Run("Ping", func(t *testing.T) {
+201 | 		client, err := NewInProcessClient(mcpServer)
+202 | 		if err != nil {
+203 | 			t.Fatalf("Failed to create client: %v", err)
+204 | 		}
+205 | 		defer client.Close()
+206 | 
+207 | 		if err := client.Start(context.Background()); err != nil {
+208 | 			t.Fatalf("Failed to start client: %v", err)
+209 | 		}
+210 | 
+211 | 		// Initialize
+212 | 		initRequest := mcp.InitializeRequest{}
+213 | 		initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+214 | 		initRequest.Params.ClientInfo = mcp.Implementation{
+215 | 			Name:    "test-client",
+216 | 			Version: "1.0.0",
+217 | 		}
+218 | 
+219 | 		_, err = client.Initialize(context.Background(), initRequest)
+220 | 		if err != nil {
+221 | 			t.Fatalf("Failed to initialize: %v", err)
+222 | 		}
+223 | 
+224 | 		err = client.Ping(context.Background())
+225 | 		if err != nil {
+226 | 			t.Errorf("Ping failed: %v", err)
+227 | 		}
+228 | 	})
+229 | 
+230 | 	t.Run("ListResources", func(t *testing.T) {
+231 | 		client, err := NewInProcessClient(mcpServer)
+232 | 		if err != nil {
+233 | 			t.Fatalf("Failed to create client: %v", err)
+234 | 		}
+235 | 		defer client.Close()
+236 | 
+237 | 		if err := client.Start(context.Background()); err != nil {
+238 | 			t.Fatalf("Failed to start client: %v", err)
+239 | 		}
+240 | 
+241 | 		// Initialize
+242 | 		initRequest := mcp.InitializeRequest{}
+243 | 		initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+244 | 		initRequest.Params.ClientInfo = mcp.Implementation{
+245 | 			Name:    "test-client",
+246 | 			Version: "1.0.0",
+247 | 		}
+248 | 
+249 | 		_, err = client.Initialize(context.Background(), initRequest)
+250 | 		if err != nil {
+251 | 			t.Fatalf("Failed to initialize: %v", err)
+252 | 		}
+253 | 
+254 | 		request := mcp.ListResourcesRequest{}
+255 | 		result, err := client.ListResources(context.Background(), request)
+256 | 		if err != nil {
+257 | 			t.Errorf("ListResources failed: %v", err)
+258 | 		}
+259 | 
+260 | 		if len(result.Resources) != 1 {
+261 | 			t.Errorf("Expected 1 resource, got %d", len(result.Resources))
+262 | 		}
+263 | 	})
+264 | 
+265 | 	t.Run("ReadResource", func(t *testing.T) {
+266 | 		client, err := NewInProcessClient(mcpServer)
+267 | 		if err != nil {
+268 | 			t.Fatalf("Failed to create client: %v", err)
+269 | 		}
+270 | 		defer client.Close()
+271 | 
+272 | 		if err := client.Start(context.Background()); err != nil {
+273 | 			t.Fatalf("Failed to start client: %v", err)
+274 | 		}
+275 | 
+276 | 		// Initialize
+277 | 		initRequest := mcp.InitializeRequest{}
+278 | 		initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+279 | 		initRequest.Params.ClientInfo = mcp.Implementation{
+280 | 			Name:    "test-client",
+281 | 			Version: "1.0.0",
+282 | 		}
+283 | 
+284 | 		_, err = client.Initialize(context.Background(), initRequest)
+285 | 		if err != nil {
+286 | 			t.Fatalf("Failed to initialize: %v", err)
+287 | 		}
+288 | 
+289 | 		request := mcp.ReadResourceRequest{}
+290 | 		request.Params.URI = "resource://testresource"
+291 | 
+292 | 		result, err := client.ReadResource(context.Background(), request)
+293 | 		if err != nil {
+294 | 			t.Errorf("ReadResource failed: %v", err)
+295 | 		}
+296 | 
+297 | 		if len(result.Contents) != 1 {
+298 | 			t.Errorf("Expected 1 content item, got %d", len(result.Contents))
+299 | 		}
+300 | 	})
+301 | 
+302 | 	t.Run("ListPrompts", func(t *testing.T) {
+303 | 		client, err := NewInProcessClient(mcpServer)
+304 | 		if err != nil {
+305 | 			t.Fatalf("Failed to create client: %v", err)
+306 | 		}
+307 | 		defer client.Close()
+308 | 
+309 | 		if err := client.Start(context.Background()); err != nil {
+310 | 			t.Fatalf("Failed to start client: %v", err)
+311 | 		}
+312 | 
+313 | 		// Initialize
+314 | 		initRequest := mcp.InitializeRequest{}
+315 | 		initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+316 | 		initRequest.Params.ClientInfo = mcp.Implementation{
+317 | 			Name:    "test-client",
+318 | 			Version: "1.0.0",
+319 | 		}
+320 | 
+321 | 		_, err = client.Initialize(context.Background(), initRequest)
+322 | 		if err != nil {
+323 | 			t.Fatalf("Failed to initialize: %v", err)
+324 | 		}
+325 | 		request := mcp.ListPromptsRequest{}
+326 | 		result, err := client.ListPrompts(context.Background(), request)
+327 | 		if err != nil {
+328 | 			t.Errorf("ListPrompts failed: %v", err)
+329 | 		}
+330 | 
+331 | 		if len(result.Prompts) != 1 {
+332 | 			t.Errorf("Expected 1 prompt, got %d", len(result.Prompts))
+333 | 		}
+334 | 	})
+335 | 
+336 | 	t.Run("GetPrompt", func(t *testing.T) {
+337 | 		client, err := NewInProcessClient(mcpServer)
+338 | 		if err != nil {
+339 | 			t.Fatalf("Failed to create client: %v", err)
+340 | 		}
+341 | 		defer client.Close()
+342 | 
+343 | 		if err := client.Start(context.Background()); err != nil {
+344 | 			t.Fatalf("Failed to start client: %v", err)
+345 | 		}
+346 | 
+347 | 		// Initialize
+348 | 		initRequest := mcp.InitializeRequest{}
+349 | 		initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+350 | 		initRequest.Params.ClientInfo = mcp.Implementation{
+351 | 			Name:    "test-client",
+352 | 			Version: "1.0.0",
+353 | 		}
+354 | 
+355 | 		_, err = client.Initialize(context.Background(), initRequest)
+356 | 		if err != nil {
+357 | 			t.Fatalf("Failed to initialize: %v", err)
+358 | 		}
+359 | 
+360 | 		request := mcp.GetPromptRequest{}
+361 | 		request.Params.Name = "test-prompt"
+362 | 
+363 | 		result, err := client.GetPrompt(context.Background(), request)
+364 | 		if err != nil {
+365 | 			t.Errorf("GetPrompt failed: %v", err)
+366 | 		}
+367 | 
+368 | 		if len(result.Messages) != 1 {
+369 | 			t.Errorf("Expected 1 message, got %d", len(result.Messages))
+370 | 		}
+371 | 	})
+372 | 
+373 | 	t.Run("ListTools", func(t *testing.T) {
+374 | 		client, err := NewInProcessClient(mcpServer)
+375 | 		if err != nil {
+376 | 			t.Fatalf("Failed to create client: %v", err)
+377 | 		}
+378 | 		defer client.Close()
+379 | 
+380 | 		if err := client.Start(context.Background()); err != nil {
+381 | 			t.Fatalf("Failed to start client: %v", err)
+382 | 		}
+383 | 
+384 | 		// Initialize
+385 | 		initRequest := mcp.InitializeRequest{}
+386 | 		initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+387 | 		initRequest.Params.ClientInfo = mcp.Implementation{
+388 | 			Name:    "test-client",
+389 | 			Version: "1.0.0",
+390 | 		}
+391 | 
+392 | 		_, err = client.Initialize(context.Background(), initRequest)
+393 | 		if err != nil {
+394 | 			t.Fatalf("Failed to initialize: %v", err)
+395 | 		}
+396 | 
+397 | 		request := mcp.ListToolsRequest{}
+398 | 		result, err := client.ListTools(context.Background(), request)
+399 | 		if err != nil {
+400 | 			t.Errorf("ListTools failed: %v", err)
+401 | 		}
+402 | 
+403 | 		if len(result.Tools) != 1 {
+404 | 			t.Errorf("Expected 1 tool, got %d", len(result.Tools))
+405 | 		}
+406 | 	})
+407 | }
+408 | 
+
+
+--------------------------------------------------------------------------------
+/client/interface.go:
 --------------------------------------------------------------------------------
   1 | // Package client provides MCP (Model Control Protocol) client implementations.
   2 | package client
   3 | 
   4 | import (
   5 | 	"context"
-  6 | 	"encoding/json"
-  7 | 	"fmt"
-  8 | 
-  9 | 	"github.com/mark3labs/mcp-go/mcp"
- 10 | )
- 11 | 
- 12 | // MCPClient represents an MCP client interface
- 13 | type MCPClient interface {
- 14 | 	// Initialize sends the initial connection request to the server
- 15 | 	Initialize(
- 16 | 		ctx context.Context,
- 17 | 		request mcp.InitializeRequest,
- 18 | 	) (*mcp.InitializeResult, error)
- 19 | 
- 20 | 	// Ping checks if the server is alive
- 21 | 	Ping(ctx context.Context) error
- 22 | 
- 23 | 	// ListResourcesByPage manually list resources by page.
- 24 | 	ListResourcesByPage(
- 25 | 		ctx context.Context,
- 26 | 		request mcp.ListResourcesRequest,
- 27 | 	) (*mcp.ListResourcesResult, error)
- 28 | 
- 29 | 	// ListResources requests a list of available resources from the server
- 30 | 	ListResources(
- 31 | 		ctx context.Context,
- 32 | 		request mcp.ListResourcesRequest,
- 33 | 	) (*mcp.ListResourcesResult, error)
- 34 | 
- 35 | 	// ListResourceTemplatesByPage manually list resource templates by page.
- 36 | 	ListResourceTemplatesByPage(
- 37 | 		ctx context.Context,
- 38 | 		request mcp.ListResourceTemplatesRequest,
- 39 | 	) (*mcp.ListResourceTemplatesResult,
- 40 | 		error)
- 41 | 
- 42 | 	// ListResourceTemplates requests a list of available resource templates from the server
- 43 | 	ListResourceTemplates(
- 44 | 		ctx context.Context,
- 45 | 		request mcp.ListResourceTemplatesRequest,
- 46 | 	) (*mcp.ListResourceTemplatesResult,
- 47 | 		error)
- 48 | 
- 49 | 	// ReadResource reads a specific resource from the server
- 50 | 	ReadResource(
- 51 | 		ctx context.Context,
- 52 | 		request mcp.ReadResourceRequest,
- 53 | 	) (*mcp.ReadResourceResult, error)
- 54 | 
- 55 | 	// Subscribe requests notifications for changes to a specific resource
- 56 | 	Subscribe(ctx context.Context, request mcp.SubscribeRequest) error
- 57 | 
- 58 | 	// Unsubscribe cancels notifications for a specific resource
- 59 | 	Unsubscribe(ctx context.Context, request mcp.UnsubscribeRequest) error
- 60 | 
- 61 | 	// ListPromptsByPage manually list prompts by page.
- 62 | 	ListPromptsByPage(
- 63 | 		ctx context.Context,
- 64 | 		request mcp.ListPromptsRequest,
- 65 | 	) (*mcp.ListPromptsResult, error)
- 66 | 
- 67 | 	// ListPrompts requests a list of available prompts from the server
- 68 | 	ListPrompts(
- 69 | 		ctx context.Context,
- 70 | 		request mcp.ListPromptsRequest,
- 71 | 	) (*mcp.ListPromptsResult, error)
- 72 | 
- 73 | 	// GetPrompt retrieves a specific prompt from the server
- 74 | 	GetPrompt(
- 75 | 		ctx context.Context,
- 76 | 		request mcp.GetPromptRequest,
- 77 | 	) (*mcp.GetPromptResult, error)
- 78 | 
- 79 | 	// ListToolsByPage manually list tools by page.
- 80 | 	ListToolsByPage(
- 81 | 		ctx context.Context,
- 82 | 		request mcp.ListToolsRequest,
- 83 | 	) (*mcp.ListToolsResult, error)
- 84 | 
- 85 | 	// ListTools requests a list of available tools from the server
- 86 | 	ListTools(
- 87 | 		ctx context.Context,
- 88 | 		request mcp.ListToolsRequest,
- 89 | 	) (*mcp.ListToolsResult, error)
- 90 | 
- 91 | 	// CallTool invokes a specific tool on the server
- 92 | 	CallTool(
- 93 | 		ctx context.Context,
- 94 | 		request mcp.CallToolRequest,
- 95 | 	) (*mcp.CallToolResult, error)
- 96 | 
- 97 | 	// SetLevel sets the logging level for the server
- 98 | 	SetLevel(ctx context.Context, request mcp.SetLevelRequest) error
- 99 | 
-100 | 	// Complete requests completion options for a given argument
-101 | 	Complete(
-102 | 		ctx context.Context,
-103 | 		request mcp.CompleteRequest,
-104 | 	) (*mcp.CompleteResult, error)
-105 | 
-106 | 	// Close client connection and cleanup resources
-107 | 	Close() error
-108 | 
-109 | 	// OnNotification registers a handler for notifications
-110 | 	OnNotification(handler func(notification mcp.JSONRPCNotification))
-111 | }
-112 | 
-113 | type mcpClient interface {
-114 | 	MCPClient
-115 | 
-116 | 	sendRequest(ctx context.Context, method string, params interface{}) (*json.RawMessage, error)
-117 | }
-118 | 
-119 | func listByPage[T any](
-120 | 	ctx context.Context,
-121 | 	client mcpClient,
-122 | 	request mcp.PaginatedRequest,
-123 | 	method string,
-124 | ) (*T, error) {
-125 | 	response, err := client.sendRequest(ctx, method, request.Params)
-126 | 	if err != nil {
-127 | 		return nil, err
-128 | 	}
-129 | 	var result T
-130 | 	if err := json.Unmarshal(*response, &result); err != nil {
-131 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-132 | 	}
-133 | 	return &result, nil
-134 | }
-135 | 
+  6 | 
+  7 | 	"github.com/mark3labs/mcp-go/mcp"
+  8 | )
+  9 | 
+ 10 | // MCPClient represents an MCP client interface
+ 11 | type MCPClient interface {
+ 12 | 	// Initialize sends the initial connection request to the server
+ 13 | 	Initialize(
+ 14 | 		ctx context.Context,
+ 15 | 		request mcp.InitializeRequest,
+ 16 | 	) (*mcp.InitializeResult, error)
+ 17 | 
+ 18 | 	// Ping checks if the server is alive
+ 19 | 	Ping(ctx context.Context) error
+ 20 | 
+ 21 | 	// ListResourcesByPage manually list resources by page.
+ 22 | 	ListResourcesByPage(
+ 23 | 		ctx context.Context,
+ 24 | 		request mcp.ListResourcesRequest,
+ 25 | 	) (*mcp.ListResourcesResult, error)
+ 26 | 
+ 27 | 	// ListResources requests a list of available resources from the server
+ 28 | 	ListResources(
+ 29 | 		ctx context.Context,
+ 30 | 		request mcp.ListResourcesRequest,
+ 31 | 	) (*mcp.ListResourcesResult, error)
+ 32 | 
+ 33 | 	// ListResourceTemplatesByPage manually list resource templates by page.
+ 34 | 	ListResourceTemplatesByPage(
+ 35 | 		ctx context.Context,
+ 36 | 		request mcp.ListResourceTemplatesRequest,
+ 37 | 	) (*mcp.ListResourceTemplatesResult,
+ 38 | 		error)
+ 39 | 
+ 40 | 	// ListResourceTemplates requests a list of available resource templates from the server
+ 41 | 	ListResourceTemplates(
+ 42 | 		ctx context.Context,
+ 43 | 		request mcp.ListResourceTemplatesRequest,
+ 44 | 	) (*mcp.ListResourceTemplatesResult,
+ 45 | 		error)
+ 46 | 
+ 47 | 	// ReadResource reads a specific resource from the server
+ 48 | 	ReadResource(
+ 49 | 		ctx context.Context,
+ 50 | 		request mcp.ReadResourceRequest,
+ 51 | 	) (*mcp.ReadResourceResult, error)
+ 52 | 
+ 53 | 	// Subscribe requests notifications for changes to a specific resource
+ 54 | 	Subscribe(ctx context.Context, request mcp.SubscribeRequest) error
+ 55 | 
+ 56 | 	// Unsubscribe cancels notifications for a specific resource
+ 57 | 	Unsubscribe(ctx context.Context, request mcp.UnsubscribeRequest) error
+ 58 | 
+ 59 | 	// ListPromptsByPage manually list prompts by page.
+ 60 | 	ListPromptsByPage(
+ 61 | 		ctx context.Context,
+ 62 | 		request mcp.ListPromptsRequest,
+ 63 | 	) (*mcp.ListPromptsResult, error)
+ 64 | 
+ 65 | 	// ListPrompts requests a list of available prompts from the server
+ 66 | 	ListPrompts(
+ 67 | 		ctx context.Context,
+ 68 | 		request mcp.ListPromptsRequest,
+ 69 | 	) (*mcp.ListPromptsResult, error)
+ 70 | 
+ 71 | 	// GetPrompt retrieves a specific prompt from the server
+ 72 | 	GetPrompt(
+ 73 | 		ctx context.Context,
+ 74 | 		request mcp.GetPromptRequest,
+ 75 | 	) (*mcp.GetPromptResult, error)
+ 76 | 
+ 77 | 	// ListToolsByPage manually list tools by page.
+ 78 | 	ListToolsByPage(
+ 79 | 		ctx context.Context,
+ 80 | 		request mcp.ListToolsRequest,
+ 81 | 	) (*mcp.ListToolsResult, error)
+ 82 | 
+ 83 | 	// ListTools requests a list of available tools from the server
+ 84 | 	ListTools(
+ 85 | 		ctx context.Context,
+ 86 | 		request mcp.ListToolsRequest,
+ 87 | 	) (*mcp.ListToolsResult, error)
+ 88 | 
+ 89 | 	// CallTool invokes a specific tool on the server
+ 90 | 	CallTool(
+ 91 | 		ctx context.Context,
+ 92 | 		request mcp.CallToolRequest,
+ 93 | 	) (*mcp.CallToolResult, error)
+ 94 | 
+ 95 | 	// SetLevel sets the logging level for the server
+ 96 | 	SetLevel(ctx context.Context, request mcp.SetLevelRequest) error
+ 97 | 
+ 98 | 	// Complete requests completion options for a given argument
+ 99 | 	Complete(
+100 | 		ctx context.Context,
+101 | 		request mcp.CompleteRequest,
+102 | 	) (*mcp.CompleteResult, error)
+103 | 
+104 | 	// Close client connection and cleanup resources
+105 | 	Close() error
+106 | 
+107 | 	// OnNotification registers a handler for notifications
+108 | 	OnNotification(handler func(notification mcp.JSONRPCNotification))
+109 | }
+110 | 
 
 
 --------------------------------------------------------------------------------
 /client/sse.go:
 --------------------------------------------------------------------------------
-  1 | package client
-  2 | 
-  3 | import (
-  4 | 	"bufio"
-  5 | 	"bytes"
-  6 | 	"context"
-  7 | 	"encoding/json"
-  8 | 	"errors"
-  9 | 	"fmt"
- 10 | 	"io"
- 11 | 	"net/http"
- 12 | 	"net/url"
- 13 | 	"strings"
- 14 | 	"sync"
- 15 | 	"sync/atomic"
- 16 | 	"time"
- 17 | 
- 18 | 	"github.com/mark3labs/mcp-go/mcp"
- 19 | )
- 20 | 
- 21 | // SSEMCPClient implements the MCPClient interface using Server-Sent Events (SSE).
- 22 | // It maintains a persistent HTTP connection to receive server-pushed events
- 23 | // while sending requests over regular HTTP POST calls. The client handles
- 24 | // automatic reconnection and message routing between requests and responses.
- 25 | type SSEMCPClient struct {
- 26 | 	baseURL       *url.URL
- 27 | 	endpoint      *url.URL
- 28 | 	httpClient    *http.Client
- 29 | 	requestID     atomic.Int64
- 30 | 	responses     map[int64]chan RPCResponse
- 31 | 	mu            sync.RWMutex
- 32 | 	done          chan struct{}
- 33 | 	initialized   bool
- 34 | 	notifications []func(mcp.JSONRPCNotification)
- 35 | 	notifyMu      sync.RWMutex
- 36 | 	endpointChan  chan struct{}
- 37 | 	capabilities  mcp.ServerCapabilities
- 38 | 	headers       map[string]string
- 39 | }
- 40 | 
- 41 | type ClientOption func(*SSEMCPClient)
- 42 | 
- 43 | func WithHeaders(headers map[string]string) ClientOption {
- 44 | 	return func(sc *SSEMCPClient) {
- 45 | 		sc.headers = headers
- 46 | 	}
- 47 | }
- 48 | 
- 49 | // NewSSEMCPClient creates a new SSE-based MCP client with the given base URL.
- 50 | // Returns an error if the URL is invalid.
- 51 | func NewSSEMCPClient(baseURL string, options ...ClientOption) (*SSEMCPClient, error) {
- 52 | 	parsedURL, err := url.Parse(baseURL)
- 53 | 	if err != nil {
- 54 | 		return nil, fmt.Errorf("invalid URL: %w", err)
- 55 | 	}
- 56 | 
- 57 | 	smc := &SSEMCPClient{
- 58 | 		baseURL:      parsedURL,
- 59 | 		httpClient:   &http.Client{},
- 60 | 		responses:    make(map[int64]chan RPCResponse),
- 61 | 		done:         make(chan struct{}),
- 62 | 		endpointChan: make(chan struct{}),
- 63 | 		headers:      make(map[string]string),
- 64 | 	}
- 65 | 
- 66 | 	for _, opt := range options {
- 67 | 		opt(smc)
- 68 | 	}
- 69 | 
- 70 | 	return smc, nil
- 71 | }
- 72 | 
- 73 | // Start initiates the SSE connection to the server and waits for the endpoint information.
- 74 | // Returns an error if the connection fails or times out waiting for the endpoint.
- 75 | func (c *SSEMCPClient) Start(ctx context.Context) error {
- 76 | 
- 77 | 	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL.String(), nil)
- 78 | 
- 79 | 	if err != nil {
- 80 | 
- 81 | 		return fmt.Errorf("failed to create request: %w", err)
- 82 | 
- 83 | 	}
- 84 | 
- 85 | 	req.Header.Set("Accept", "text/event-stream")
- 86 | 	req.Header.Set("Cache-Control", "no-cache")
- 87 | 	req.Header.Set("Connection", "keep-alive")
- 88 | 	for k, v := range c.headers {
- 89 | 		req.Header.Set(k, v)
- 90 | 	}
- 91 | 
- 92 | 	resp, err := c.httpClient.Do(req)
- 93 | 	if err != nil {
- 94 | 		return fmt.Errorf("failed to connect to SSE stream: %w", err)
- 95 | 	}
- 96 | 
- 97 | 	if resp.StatusCode != http.StatusOK {
- 98 | 		resp.Body.Close()
- 99 | 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-100 | 	}
-101 | 
-102 | 	go c.readSSE(resp.Body)
-103 | 
-104 | 	// Wait for the endpoint to be received
-105 | 
-106 | 	select {
-107 | 	case <-c.endpointChan:
-108 | 		// Endpoint received, proceed
-109 | 	case <-ctx.Done():
-110 | 		return fmt.Errorf("context cancelled while waiting for endpoint")
-111 | 	case <-time.After(30 * time.Second): // Add a timeout
-112 | 		return fmt.Errorf("timeout waiting for endpoint")
-113 | 	}
-114 | 
-115 | 	return nil
-116 | }
-117 | 
-118 | // readSSE continuously reads the SSE stream and processes events.
-119 | // It runs until the connection is closed or an error occurs.
-120 | func (c *SSEMCPClient) readSSE(reader io.ReadCloser) {
-121 | 	defer reader.Close()
-122 | 
-123 | 	br := bufio.NewReader(reader)
-124 | 	var event, data string
-125 | 
-126 | 	for {
-127 | 		select {
-128 | 		case <-c.done:
-129 | 			return
-130 | 		default:
-131 | 			line, err := br.ReadString('\n')
-132 | 			if err != nil {
-133 | 				if err == io.EOF {
-134 | 					// Process any pending event before exit
-135 | 					if event != "" && data != "" {
-136 | 						c.handleSSEEvent(event, data)
-137 | 					}
-138 | 					break
-139 | 				}
-140 | 				select {
-141 | 				case <-c.done:
-142 | 					return
-143 | 				default:
-144 | 					fmt.Printf("SSE stream error: %v\n", err)
-145 | 					return
-146 | 				}
-147 | 			}
-148 | 
-149 | 			// Remove only newline markers
-150 | 			line = strings.TrimRight(line, "\r\n")
-151 | 			if line == "" {
-152 | 				// Empty line means end of event
-153 | 				if event != "" && data != "" {
-154 | 					c.handleSSEEvent(event, data)
-155 | 					event = ""
-156 | 					data = ""
-157 | 				}
-158 | 				continue
-159 | 			}
-160 | 
-161 | 			if strings.HasPrefix(line, "event:") {
-162 | 				event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-163 | 			} else if strings.HasPrefix(line, "data:") {
-164 | 				data = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-165 | 			}
-166 | 		}
-167 | 	}
-168 | }
-169 | 
-170 | // handleSSEEvent processes SSE events based on their type.
-171 | // Handles 'endpoint' events for connection setup and 'message' events for JSON-RPC communication.
-172 | func (c *SSEMCPClient) handleSSEEvent(event, data string) {
-173 | 	switch event {
-174 | 	case "endpoint":
-175 | 		endpoint, err := c.baseURL.Parse(data)
-176 | 		if err != nil {
-177 | 			fmt.Printf("Error parsing endpoint URL: %v\n", err)
-178 | 			return
-179 | 		}
-180 | 		if endpoint.Host != c.baseURL.Host {
-181 | 			fmt.Printf("Endpoint origin does not match connection origin\n")
-182 | 			return
-183 | 		}
-184 | 		c.endpoint = endpoint
-185 | 		close(c.endpointChan)
-186 | 
-187 | 	case "message":
-188 | 		var baseMessage struct {
-189 | 			JSONRPC string          `json:"jsonrpc"`
-190 | 			ID      *int64          `json:"id,omitempty"`
-191 | 			Method  string          `json:"method,omitempty"`
-192 | 			Result  json.RawMessage `json:"result,omitempty"`
-193 | 			Error   *struct {
-194 | 				Code    int    `json:"code"`
-195 | 				Message string `json:"message"`
-196 | 			} `json:"error,omitempty"`
-197 | 		}
-198 | 
-199 | 		if err := json.Unmarshal([]byte(data), &baseMessage); err != nil {
-200 | 			fmt.Printf("Error unmarshaling message: %v\n", err)
-201 | 			return
-202 | 		}
-203 | 
-204 | 		// Handle notification
-205 | 		if baseMessage.ID == nil {
-206 | 			var notification mcp.JSONRPCNotification
-207 | 			if err := json.Unmarshal([]byte(data), &notification); err != nil {
-208 | 				return
-209 | 			}
-210 | 			c.notifyMu.RLock()
-211 | 			for _, handler := range c.notifications {
-212 | 				handler(notification)
-213 | 			}
-214 | 			c.notifyMu.RUnlock()
-215 | 			return
-216 | 		}
-217 | 
-218 | 		c.mu.RLock()
-219 | 		ch, ok := c.responses[*baseMessage.ID]
-220 | 		c.mu.RUnlock()
-221 | 
-222 | 		if ok {
-223 | 			if baseMessage.Error != nil {
-224 | 				ch <- RPCResponse{
-225 | 					Error: &baseMessage.Error.Message,
-226 | 				}
-227 | 			} else {
-228 | 				ch <- RPCResponse{
-229 | 					Response: &baseMessage.Result,
-230 | 				}
-231 | 			}
-232 | 			c.mu.Lock()
-233 | 			delete(c.responses, *baseMessage.ID)
-234 | 			c.mu.Unlock()
-235 | 		}
-236 | 	}
-237 | }
-238 | 
-239 | // OnNotification registers a handler function to be called when notifications are received.
-240 | // Multiple handlers can be registered and will be called in the order they were added.
-241 | func (c *SSEMCPClient) OnNotification(
-242 | 	handler func(notification mcp.JSONRPCNotification),
-243 | ) {
-244 | 	c.notifyMu.Lock()
-245 | 	defer c.notifyMu.Unlock()
-246 | 	c.notifications = append(c.notifications, handler)
-247 | }
-248 | 
-249 | // sendRequest sends a JSON-RPC request to the server and waits for a response.
-250 | // Returns the raw JSON response message or an error if the request fails.
-251 | func (c *SSEMCPClient) sendRequest(
-252 | 	ctx context.Context,
-253 | 	method string,
-254 | 	params interface{},
-255 | ) (*json.RawMessage, error) {
-256 | 	if !c.initialized && method != "initialize" {
-257 | 		return nil, fmt.Errorf("client not initialized")
-258 | 	}
-259 | 
-260 | 	if c.endpoint == nil {
-261 | 		return nil, fmt.Errorf("endpoint not received")
-262 | 	}
-263 | 
-264 | 	id := c.requestID.Add(1)
-265 | 
-266 | 	request := mcp.JSONRPCRequest{
-267 | 		JSONRPC: mcp.JSONRPC_VERSION,
-268 | 		ID:      id,
-269 | 		Request: mcp.Request{
-270 | 			Method: method,
-271 | 		},
-272 | 		Params: params,
-273 | 	}
-274 | 
-275 | 	requestBytes, err := json.Marshal(request)
-276 | 	if err != nil {
-277 | 		return nil, fmt.Errorf("failed to marshal request: %w", err)
-278 | 	}
-279 | 
-280 | 	responseChan := make(chan RPCResponse, 1)
-281 | 	c.mu.Lock()
-282 | 	c.responses[id] = responseChan
-283 | 	c.mu.Unlock()
-284 | 
-285 | 	req, err := http.NewRequestWithContext(
-286 | 		ctx,
-287 | 		"POST",
-288 | 		c.endpoint.String(),
-289 | 		bytes.NewReader(requestBytes),
-290 | 	)
-291 | 	if err != nil {
-292 | 		return nil, fmt.Errorf("failed to create request: %w", err)
-293 | 	}
-294 | 
-295 | 	req.Header.Set("Content-Type", "application/json")
-296 | 	// set custom http headers
-297 | 	for k, v := range c.headers {
-298 | 		req.Header.Set(k, v)
-299 | 	}
-300 | 
-301 | 	resp, err := c.httpClient.Do(req)
-302 | 	if err != nil {
-303 | 		return nil, fmt.Errorf("failed to send request: %w", err)
-304 | 	}
-305 | 	defer resp.Body.Close()
-306 | 
-307 | 	if resp.StatusCode != http.StatusOK &&
-308 | 		resp.StatusCode != http.StatusAccepted {
-309 | 		body, _ := io.ReadAll(resp.Body)
-310 | 		return nil, fmt.Errorf(
-311 | 			"request failed with status %d: %s",
-312 | 			resp.StatusCode,
-313 | 			body,
-314 | 		)
-315 | 	}
-316 | 
-317 | 	select {
-318 | 	case <-ctx.Done():
-319 | 		c.mu.Lock()
-320 | 		delete(c.responses, id)
-321 | 		c.mu.Unlock()
-322 | 		return nil, ctx.Err()
-323 | 	case response := <-responseChan:
-324 | 		if response.Error != nil {
-325 | 			return nil, errors.New(*response.Error)
-326 | 		}
-327 | 		return response.Response, nil
-328 | 	}
-329 | }
-330 | 
-331 | func (c *SSEMCPClient) Initialize(
-332 | 	ctx context.Context,
-333 | 	request mcp.InitializeRequest,
-334 | ) (*mcp.InitializeResult, error) {
-335 | 	// Ensure we send a params object with all required fields
-336 | 	params := struct {
-337 | 		ProtocolVersion string                 `json:"protocolVersion"`
-338 | 		ClientInfo      mcp.Implementation     `json:"clientInfo"`
-339 | 		Capabilities    mcp.ClientCapabilities `json:"capabilities"`
-340 | 	}{
-341 | 		ProtocolVersion: request.Params.ProtocolVersion,
-342 | 		ClientInfo:      request.Params.ClientInfo,
-343 | 		Capabilities:    request.Params.Capabilities, // Will be empty struct if not set
-344 | 	}
-345 | 
-346 | 	response, err := c.sendRequest(ctx, "initialize", params)
-347 | 	if err != nil {
-348 | 		return nil, err
-349 | 	}
-350 | 
-351 | 	var result mcp.InitializeResult
-352 | 	if err := json.Unmarshal(*response, &result); err != nil {
-353 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-354 | 	}
-355 | 
-356 | 	// Store capabilities
-357 | 	c.capabilities = result.Capabilities
-358 | 
-359 | 	// Send initialized notification
-360 | 	notification := mcp.JSONRPCNotification{
-361 | 		JSONRPC: mcp.JSONRPC_VERSION,
-362 | 		Notification: mcp.Notification{
-363 | 			Method: "notifications/initialized",
-364 | 		},
-365 | 	}
-366 | 
-367 | 	notificationBytes, err := json.Marshal(notification)
-368 | 	if err != nil {
-369 | 		return nil, fmt.Errorf(
-370 | 			"failed to marshal initialized notification: %w",
-371 | 			err,
-372 | 		)
-373 | 	}
-374 | 
-375 | 	req, err := http.NewRequestWithContext(
-376 | 		ctx,
-377 | 		"POST",
-378 | 		c.endpoint.String(),
-379 | 		bytes.NewReader(notificationBytes),
-380 | 	)
-381 | 	if err != nil {
-382 | 		return nil, fmt.Errorf("failed to create notification request: %w", err)
-383 | 	}
-384 | 
-385 | 	req.Header.Set("Content-Type", "application/json")
-386 | 
-387 | 	resp, err := c.httpClient.Do(req)
-388 | 	if err != nil {
-389 | 		return nil, fmt.Errorf(
-390 | 			"failed to send initialized notification: %w",
-391 | 			err,
-392 | 		)
-393 | 	}
-394 | 	defer resp.Body.Close()
-395 | 
-396 | 	c.initialized = true
-397 | 	return &result, nil
-398 | }
-399 | 
-400 | func (c *SSEMCPClient) Ping(ctx context.Context) error {
-401 | 	_, err := c.sendRequest(ctx, "ping", nil)
-402 | 	return err
-403 | }
-404 | 
-405 | // ListResourcesByPage manually list resources by page.
-406 | func (c *SSEMCPClient) ListResourcesByPage(
-407 | 	ctx context.Context,
-408 | 	request mcp.ListResourcesRequest,
-409 | ) (*mcp.ListResourcesResult, error) {
-410 | 	result, err := listByPage[mcp.ListResourcesResult](ctx, c, request.PaginatedRequest, "resources/list")
-411 | 	if err != nil {
-412 | 		return nil, err
-413 | 	}
-414 | 	return result, nil
-415 | }
-416 | 
-417 | func (c *SSEMCPClient) ListResources(
-418 | 	ctx context.Context,
-419 | 	request mcp.ListResourcesRequest,
-420 | ) (*mcp.ListResourcesResult, error) {
-421 | 	result, err := c.ListResourcesByPage(ctx, request)
-422 | 	if err != nil {
-423 | 		return nil, err
-424 | 	}
-425 | 	for result.NextCursor != "" {
-426 | 		select {
-427 | 		case <-ctx.Done():
-428 | 			return nil, ctx.Err()
-429 | 		default:
-430 | 			request.Params.Cursor = result.NextCursor
-431 | 			newPageRes, err := c.ListResourcesByPage(ctx, request)
-432 | 			if err != nil {
-433 | 				return nil, err
-434 | 			}
-435 | 			result.Resources = append(result.Resources, newPageRes.Resources...)
-436 | 			result.NextCursor = newPageRes.NextCursor
-437 | 		}
-438 | 	}
-439 | 	return result, nil
-440 | }
-441 | 
-442 | func (c *SSEMCPClient) ListResourceTemplatesByPage(
-443 | 	ctx context.Context,
-444 | 	request mcp.ListResourceTemplatesRequest,
-445 | ) (*mcp.ListResourceTemplatesResult, error) {
-446 | 	result, err := listByPage[mcp.ListResourceTemplatesResult](ctx, c, request.PaginatedRequest, "resources/templates/list")
-447 | 	if err != nil {
-448 | 		return nil, err
-449 | 	}
-450 | 	return result, nil
-451 | }
-452 | 
-453 | func (c *SSEMCPClient) ListResourceTemplates(
-454 | 	ctx context.Context,
-455 | 	request mcp.ListResourceTemplatesRequest,
-456 | ) (*mcp.ListResourceTemplatesResult, error) {
-457 | 	result, err := c.ListResourceTemplatesByPage(ctx, request)
-458 | 	if err != nil {
-459 | 		return nil, err
-460 | 	}
-461 | 	for result.NextCursor != "" {
-462 | 		select {
-463 | 		case <-ctx.Done():
-464 | 			return nil, ctx.Err()
-465 | 		default:
-466 | 			request.Params.Cursor = result.NextCursor
-467 | 			newPageRes, err := c.ListResourceTemplatesByPage(ctx, request)
-468 | 			if err != nil {
-469 | 				return nil, err
-470 | 			}
-471 | 			result.ResourceTemplates = append(result.ResourceTemplates, newPageRes.ResourceTemplates...)
-472 | 			result.NextCursor = newPageRes.NextCursor
-473 | 		}
-474 | 	}
-475 | 	return result, nil
-476 | }
-477 | 
-478 | func (c *SSEMCPClient) ReadResource(
-479 | 	ctx context.Context,
-480 | 	request mcp.ReadResourceRequest,
-481 | ) (*mcp.ReadResourceResult, error) {
-482 | 	response, err := c.sendRequest(ctx, "resources/read", request.Params)
-483 | 	if err != nil {
-484 | 		return nil, err
-485 | 	}
-486 | 
-487 | 	return mcp.ParseReadResourceResult(response)
-488 | }
-489 | 
-490 | func (c *SSEMCPClient) Subscribe(
-491 | 	ctx context.Context,
-492 | 	request mcp.SubscribeRequest,
-493 | ) error {
-494 | 	_, err := c.sendRequest(ctx, "resources/subscribe", request.Params)
-495 | 	return err
-496 | }
-497 | 
-498 | func (c *SSEMCPClient) Unsubscribe(
-499 | 	ctx context.Context,
-500 | 	request mcp.UnsubscribeRequest,
-501 | ) error {
-502 | 	_, err := c.sendRequest(ctx, "resources/unsubscribe", request.Params)
-503 | 	return err
-504 | }
-505 | 
-506 | func (c *SSEMCPClient) ListPromptsByPage(
-507 | 	ctx context.Context,
-508 | 	request mcp.ListPromptsRequest,
-509 | ) (*mcp.ListPromptsResult, error) {
-510 | 	result, err := listByPage[mcp.ListPromptsResult](ctx, c, request.PaginatedRequest, "prompts/list")
-511 | 	if err != nil {
-512 | 		return nil, err
-513 | 	}
-514 | 	return result, nil
-515 | }
-516 | 
-517 | func (c *SSEMCPClient) ListPrompts(
-518 | 	ctx context.Context,
-519 | 	request mcp.ListPromptsRequest,
-520 | ) (*mcp.ListPromptsResult, error) {
-521 | 	result, err := c.ListPromptsByPage(ctx, request)
-522 | 	if err != nil {
-523 | 		return nil, err
-524 | 	}
-525 | 	for result.NextCursor != "" {
-526 | 		select {
-527 | 		case <-ctx.Done():
-528 | 			return nil, ctx.Err()
-529 | 		default:
-530 | 			request.Params.Cursor = result.NextCursor
-531 | 			newPageRes, err := c.ListPromptsByPage(ctx, request)
-532 | 			if err != nil {
-533 | 				return nil, err
-534 | 			}
-535 | 			result.Prompts = append(result.Prompts, newPageRes.Prompts...)
-536 | 			result.NextCursor = newPageRes.NextCursor
-537 | 		}
-538 | 	}
-539 | 	return result, nil
-540 | }
-541 | 
-542 | func (c *SSEMCPClient) GetPrompt(
-543 | 	ctx context.Context,
-544 | 	request mcp.GetPromptRequest,
-545 | ) (*mcp.GetPromptResult, error) {
-546 | 	response, err := c.sendRequest(ctx, "prompts/get", request.Params)
-547 | 	if err != nil {
-548 | 		return nil, err
-549 | 	}
-550 | 
-551 | 	return mcp.ParseGetPromptResult(response)
-552 | }
-553 | 
-554 | func (c *SSEMCPClient) ListToolsByPage(
-555 | 	ctx context.Context,
-556 | 	request mcp.ListToolsRequest,
-557 | ) (*mcp.ListToolsResult, error) {
-558 | 	result, err := listByPage[mcp.ListToolsResult](ctx, c, request.PaginatedRequest, "tools/list")
-559 | 	if err != nil {
-560 | 		return nil, err
-561 | 	}
-562 | 	return result, nil
-563 | }
-564 | 
-565 | func (c *SSEMCPClient) ListTools(
-566 | 	ctx context.Context,
-567 | 	request mcp.ListToolsRequest,
-568 | ) (*mcp.ListToolsResult, error) {
-569 | 	result, err := c.ListToolsByPage(ctx, request)
-570 | 	if err != nil {
-571 | 		return nil, err
-572 | 	}
-573 | 	for result.NextCursor != "" {
-574 | 		select {
-575 | 		case <-ctx.Done():
-576 | 			return nil, ctx.Err()
-577 | 		default:
-578 | 			request.Params.Cursor = result.NextCursor
-579 | 			newPageRes, err := c.ListToolsByPage(ctx, request)
-580 | 			if err != nil {
-581 | 				return nil, err
-582 | 			}
-583 | 			result.Tools = append(result.Tools, newPageRes.Tools...)
-584 | 			result.NextCursor = newPageRes.NextCursor
-585 | 		}
-586 | 	}
-587 | 	return result, nil
-588 | }
-589 | 
-590 | func (c *SSEMCPClient) CallTool(
-591 | 	ctx context.Context,
-592 | 	request mcp.CallToolRequest,
-593 | ) (*mcp.CallToolResult, error) {
-594 | 	response, err := c.sendRequest(ctx, "tools/call", request.Params)
-595 | 	if err != nil {
-596 | 		return nil, err
-597 | 	}
-598 | 
-599 | 	return mcp.ParseCallToolResult(response)
-600 | }
-601 | 
-602 | func (c *SSEMCPClient) SetLevel(
-603 | 	ctx context.Context,
-604 | 	request mcp.SetLevelRequest,
-605 | ) error {
-606 | 	_, err := c.sendRequest(ctx, "logging/setLevel", request.Params)
-607 | 	return err
-608 | }
-609 | 
-610 | func (c *SSEMCPClient) Complete(
-611 | 	ctx context.Context,
-612 | 	request mcp.CompleteRequest,
-613 | ) (*mcp.CompleteResult, error) {
-614 | 	response, err := c.sendRequest(ctx, "completion/complete", request.Params)
-615 | 	if err != nil {
-616 | 		return nil, err
-617 | 	}
-618 | 
-619 | 	var result mcp.CompleteResult
-620 | 	if err := json.Unmarshal(*response, &result); err != nil {
-621 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-622 | 	}
-623 | 
-624 | 	return &result, nil
-625 | }
-626 | 
-627 | // Helper methods
-628 | 
-629 | // GetEndpoint returns the current endpoint URL for the SSE connection.
-630 | func (c *SSEMCPClient) GetEndpoint() *url.URL {
-631 | 	return c.endpoint
-632 | }
-633 | 
-634 | // Close shuts down the SSE client connection and cleans up any pending responses.
-635 | // Returns an error if the shutdown process fails.
-636 | func (c *SSEMCPClient) Close() error {
-637 | 	select {
-638 | 	case <-c.done:
-639 | 		return nil // Already closed
-640 | 	default:
-641 | 		close(c.done)
-642 | 	}
-643 | 
-644 | 	// Clean up any pending responses
-645 | 	c.mu.Lock()
-646 | 	for _, ch := range c.responses {
-647 | 		close(ch)
-648 | 	}
-649 | 	c.responses = make(map[int64]chan RPCResponse)
-650 | 	c.mu.Unlock()
-651 | 
-652 | 	return nil
-653 | }
-654 | 
+ 1 | package client
+ 2 | 
+ 3 | import (
+ 4 | 	"fmt"
+ 5 | 	"github.com/mark3labs/mcp-go/client/transport"
+ 6 | 	"net/url"
+ 7 | )
+ 8 | 
+ 9 | func WithHeaders(headers map[string]string) transport.ClientOption {
+10 | 	return transport.WithHeaders(headers)
+11 | }
+12 | 
+13 | // NewSSEMCPClient creates a new SSE-based MCP client with the given base URL.
+14 | // Returns an error if the URL is invalid.
+15 | func NewSSEMCPClient(baseURL string, options ...transport.ClientOption) (*Client, error) {
+16 | 
+17 | 	sseTransport, err := transport.NewSSE(baseURL, options...)
+18 | 	if err != nil {
+19 | 		return nil, fmt.Errorf("failed to create SSE transport: %w", err)
+20 | 	}
+21 | 
+22 | 	return NewClient(sseTransport), nil
+23 | }
+24 | 
+25 | // GetEndpoint returns the current endpoint URL for the SSE connection.
+26 | //
+27 | // Note: This method only works with SSE transport, or it will panic.
+28 | func GetEndpoint(c *Client) *url.URL {
+29 | 	t := c.GetTransport()
+30 | 	sse := t.(*transport.SSE)
+31 | 	return sse.GetEndpoint()
+32 | }
+33 | 
 
 
 --------------------------------------------------------------------------------
@@ -812,767 +1072,306 @@
   2 | 
   3 | import (
   4 | 	"context"
-  5 | 	"testing"
-  6 | 	"time"
-  7 | 
-  8 | 	"github.com/mark3labs/mcp-go/mcp"
-  9 | 	"github.com/mark3labs/mcp-go/server"
- 10 | )
- 11 | 
- 12 | func TestSSEMCPClient(t *testing.T) {
- 13 | 	// Create MCP server with capabilities
- 14 | 	mcpServer := server.NewMCPServer(
- 15 | 		"test-server",
- 16 | 		"1.0.0",
- 17 | 		server.WithResourceCapabilities(true, true),
- 18 | 		server.WithPromptCapabilities(true),
- 19 | 		server.WithToolCapabilities(true),
- 20 | 	)
- 21 | 
- 22 | 	// Add a test tool
- 23 | 	mcpServer.AddTool(mcp.NewTool(
- 24 | 		"test-tool",
- 25 | 		mcp.WithDescription("Test tool"),
- 26 | 		mcp.WithString("parameter-1", mcp.Description("A string tool parameter")),
- 27 | 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
- 28 | 		return &mcp.CallToolResult{
- 29 | 			Content: []mcp.Content{
- 30 | 				mcp.TextContent{
- 31 | 					Type: "text",
- 32 | 					Text: "Input parameter: " + request.Params.Arguments["parameter-1"].(string),
- 33 | 				},
- 34 | 			},
- 35 | 		}, nil
- 36 | 	})
- 37 | 
- 38 | 	// Initialize
- 39 | 	testServer := server.NewTestServer(mcpServer)
- 40 | 	defer testServer.Close()
- 41 | 
- 42 | 	t.Run("Can create client", func(t *testing.T) {
- 43 | 		client, err := NewSSEMCPClient(testServer.URL + "/sse")
- 44 | 		if err != nil {
- 45 | 			t.Fatalf("Failed to create client: %v", err)
- 46 | 		}
- 47 | 		defer client.Close()
- 48 | 
- 49 | 		if client.baseURL == nil {
- 50 | 			t.Error("Base URL should not be nil")
- 51 | 		}
- 52 | 	})
- 53 | 
- 54 | 	t.Run("Can initialize and make requests", func(t *testing.T) {
- 55 | 		client, err := NewSSEMCPClient(testServer.URL + "/sse")
- 56 | 		if err != nil {
- 57 | 			t.Fatalf("Failed to create client: %v", err)
- 58 | 		}
- 59 | 		defer client.Close()
- 60 | 
- 61 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
- 62 | 		defer cancel()
- 63 | 
- 64 | 		// Start the client
- 65 | 		if err := client.Start(ctx); err != nil {
- 66 | 			t.Fatalf("Failed to start client: %v", err)
+  5 | 	"github.com/mark3labs/mcp-go/client/transport"
+  6 | 	"testing"
+  7 | 	"time"
+  8 | 
+  9 | 	"github.com/mark3labs/mcp-go/mcp"
+ 10 | 	"github.com/mark3labs/mcp-go/server"
+ 11 | )
+ 12 | 
+ 13 | func TestSSEMCPClient(t *testing.T) {
+ 14 | 	// Create MCP server with capabilities
+ 15 | 	mcpServer := server.NewMCPServer(
+ 16 | 		"test-server",
+ 17 | 		"1.0.0",
+ 18 | 		server.WithResourceCapabilities(true, true),
+ 19 | 		server.WithPromptCapabilities(true),
+ 20 | 		server.WithToolCapabilities(true),
+ 21 | 	)
+ 22 | 
+ 23 | 	// Add a test tool
+ 24 | 	mcpServer.AddTool(mcp.NewTool(
+ 25 | 		"test-tool",
+ 26 | 		mcp.WithDescription("Test tool"),
+ 27 | 		mcp.WithString("parameter-1", mcp.Description("A string tool parameter")),
+ 28 | 		mcp.WithToolAnnotation(mcp.ToolAnnotation{
+ 29 | 			Title:           "Test Tool Annotation Title",
+ 30 | 			ReadOnlyHint:    true,
+ 31 | 			DestructiveHint: false,
+ 32 | 			IdempotentHint:  true,
+ 33 | 			OpenWorldHint:   false,
+ 34 | 		}),
+ 35 | 	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+ 36 | 		return &mcp.CallToolResult{
+ 37 | 			Content: []mcp.Content{
+ 38 | 				mcp.TextContent{
+ 39 | 					Type: "text",
+ 40 | 					Text: "Input parameter: " + request.Params.Arguments["parameter-1"].(string),
+ 41 | 				},
+ 42 | 			},
+ 43 | 		}, nil
+ 44 | 	})
+ 45 | 
+ 46 | 	// Initialize
+ 47 | 	testServer := server.NewTestServer(mcpServer)
+ 48 | 	defer testServer.Close()
+ 49 | 
+ 50 | 	t.Run("Can create client", func(t *testing.T) {
+ 51 | 		client, err := NewSSEMCPClient(testServer.URL + "/sse")
+ 52 | 		if err != nil {
+ 53 | 			t.Fatalf("Failed to create client: %v", err)
+ 54 | 		}
+ 55 | 		defer client.Close()
+ 56 | 
+ 57 | 		sseTransport := client.GetTransport().(*transport.SSE)
+ 58 | 		if sseTransport.GetBaseURL() == nil {
+ 59 | 			t.Error("Base URL should not be nil")
+ 60 | 		}
+ 61 | 	})
+ 62 | 
+ 63 | 	t.Run("Can initialize and make requests", func(t *testing.T) {
+ 64 | 		client, err := NewSSEMCPClient(testServer.URL + "/sse")
+ 65 | 		if err != nil {
+ 66 | 			t.Fatalf("Failed to create client: %v", err)
  67 | 		}
- 68 | 
- 69 | 		// Initialize
- 70 | 		initRequest := mcp.InitializeRequest{}
- 71 | 		initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
- 72 | 		initRequest.Params.ClientInfo = mcp.Implementation{
- 73 | 			Name:    "test-client",
- 74 | 			Version: "1.0.0",
- 75 | 		}
- 76 | 
- 77 | 		result, err := client.Initialize(ctx, initRequest)
- 78 | 		if err != nil {
- 79 | 			t.Fatalf("Failed to initialize: %v", err)
- 80 | 		}
- 81 | 
- 82 | 		if result.ServerInfo.Name != "test-server" {
- 83 | 			t.Errorf(
- 84 | 				"Expected server name 'test-server', got '%s'",
- 85 | 				result.ServerInfo.Name,
- 86 | 			)
- 87 | 		}
- 88 | 
- 89 | 		// Test Ping
- 90 | 		if err := client.Ping(ctx); err != nil {
- 91 | 			t.Errorf("Ping failed: %v", err)
- 92 | 		}
- 93 | 
- 94 | 		// Test ListTools
- 95 | 		toolsRequest := mcp.ListToolsRequest{}
- 96 | 		_, err = client.ListTools(ctx, toolsRequest)
- 97 | 		if err != nil {
- 98 | 			t.Errorf("ListTools failed: %v", err)
- 99 | 		}
-100 | 	})
-101 | 
-102 | 	// t.Run("Can handle notifications", func(t *testing.T) {
-103 | 	// 	client, err := NewSSEMCPClient(testServer.URL + "/sse")
-104 | 	// 	if err != nil {
-105 | 	// 		t.Fatalf("Failed to create client: %v", err)
-106 | 	// 	}
-107 | 	// 	defer client.Close()
-108 | 
-109 | 	// 	notificationReceived := make(chan mcp.JSONRPCNotification, 1)
-110 | 	// 	client.OnNotification(func(notification mcp.JSONRPCNotification) {
-111 | 	// 		notificationReceived <- notification
-112 | 	// 	})
-113 | 
-114 | 	// 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-115 | 	// 	defer cancel()
-116 | 
-117 | 	// 	if err := client.Start(ctx); err != nil {
-118 | 	// 		t.Fatalf("Failed to start client: %v", err)
-119 | 	// 	}
-120 | 
-121 | 	// 	// Initialize first
-122 | 	// 	initRequest := mcp.InitializeRequest{}
-123 | 	// 	initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
-124 | 	// 	initRequest.Params.ClientInfo = mcp.Implementation{
-125 | 	// 		Name:    "test-client",
-126 | 	// 		Version: "1.0.0",
-127 | 	// 	}
+ 68 | 		defer client.Close()
+ 69 | 
+ 70 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+ 71 | 		defer cancel()
+ 72 | 
+ 73 | 		// Start the client
+ 74 | 		if err := client.Start(ctx); err != nil {
+ 75 | 			t.Fatalf("Failed to start client: %v", err)
+ 76 | 		}
+ 77 | 
+ 78 | 		// Initialize
+ 79 | 		initRequest := mcp.InitializeRequest{}
+ 80 | 		initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+ 81 | 		initRequest.Params.ClientInfo = mcp.Implementation{
+ 82 | 			Name:    "test-client",
+ 83 | 			Version: "1.0.0",
+ 84 | 		}
+ 85 | 
+ 86 | 		result, err := client.Initialize(ctx, initRequest)
+ 87 | 		if err != nil {
+ 88 | 			t.Fatalf("Failed to initialize: %v", err)
+ 89 | 		}
+ 90 | 
+ 91 | 		if result.ServerInfo.Name != "test-server" {
+ 92 | 			t.Errorf(
+ 93 | 				"Expected server name 'test-server', got '%s'",
+ 94 | 				result.ServerInfo.Name,
+ 95 | 			)
+ 96 | 		}
+ 97 | 
+ 98 | 		// Test Ping
+ 99 | 		if err := client.Ping(ctx); err != nil {
+100 | 			t.Errorf("Ping failed: %v", err)
+101 | 		}
+102 | 
+103 | 		// Test ListTools
+104 | 		toolsRequest := mcp.ListToolsRequest{}
+105 | 		toolListResult, err := client.ListTools(ctx, toolsRequest)
+106 | 		if err != nil {
+107 | 			t.Errorf("ListTools failed: %v", err)
+108 | 		}
+109 | 		if toolListResult == nil || len((*toolListResult).Tools) == 0 {
+110 | 			t.Errorf("Expected one tool")
+111 | 		}
+112 | 		testToolAnnotations := (*toolListResult).Tools[0].Annotations
+113 | 		if testToolAnnotations.Title != "Test Tool Annotation Title" ||
+114 | 			testToolAnnotations.ReadOnlyHint != true ||
+115 | 			testToolAnnotations.DestructiveHint != false ||
+116 | 			testToolAnnotations.IdempotentHint != true ||
+117 | 			testToolAnnotations.OpenWorldHint != false {
+118 | 			t.Errorf("The annotations of the tools are invalid")
+119 | 		}
+120 | 	})
+121 | 
+122 | 	// t.Run("Can handle notifications", func(t *testing.T) {
+123 | 	// 	client, err := NewSSEMCPClient(testServer.URL + "/sse")
+124 | 	// 	if err != nil {
+125 | 	// 		t.Fatalf("Failed to create client: %v", err)
+126 | 	// 	}
+127 | 	// 	defer client.Close()
 128 | 
-129 | 	// 	_, err = client.Initialize(ctx, initRequest)
-130 | 	// 	if err != nil {
-131 | 	// 		t.Fatalf("Failed to initialize: %v", err)
-132 | 	// 	}
+129 | 	// 	notificationReceived := make(chan mcp.JSONRPCNotification, 1)
+130 | 	// 	client.OnNotification(func(notification mcp.JSONRPCNotification) {
+131 | 	// 		notificationReceived <- notification
+132 | 	// 	})
 133 | 
-134 | 	// 	// Subscribe to a resource to test notifications
-135 | 	// 	subRequest := mcp.SubscribeRequest{}
-136 | 	// 	subRequest.Params.URI = "test://resource"
-137 | 	// 	if err := client.Subscribe(ctx, subRequest); err != nil {
-138 | 	// 		t.Fatalf("Failed to subscribe: %v", err)
+134 | 	// 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+135 | 	// 	defer cancel()
+136 | 
+137 | 	// 	if err := client.Start(ctx); err != nil {
+138 | 	// 		t.Fatalf("Failed to start client: %v", err)
 139 | 	// 	}
 140 | 
-141 | 	// 	select {
-142 | 	// 	case <-notificationReceived:
-143 | 	// 		// Success
-144 | 	// 	case <-time.After(time.Second):
-145 | 	// 		t.Error("Timeout waiting for notification")
-146 | 	// 	}
-147 | 	// })
+141 | 	// 	// Initialize first
+142 | 	// 	initRequest := mcp.InitializeRequest{}
+143 | 	// 	initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+144 | 	// 	initRequest.Params.ClientInfo = mcp.Implementation{
+145 | 	// 		Name:    "test-client",
+146 | 	// 		Version: "1.0.0",
+147 | 	// 	}
 148 | 
-149 | 	t.Run("Handles errors properly", func(t *testing.T) {
-150 | 		client, err := NewSSEMCPClient(testServer.URL + "/sse")
-151 | 		if err != nil {
-152 | 			t.Fatalf("Failed to create client: %v", err)
-153 | 		}
-154 | 		defer client.Close()
-155 | 
-156 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-157 | 		defer cancel()
-158 | 
-159 | 		if err := client.Start(ctx); err != nil {
-160 | 			t.Fatalf("Failed to start client: %v", err)
-161 | 		}
-162 | 
-163 | 		// Try to make a request without initializing
-164 | 		toolsRequest := mcp.ListToolsRequest{}
-165 | 		_, err = client.ListTools(ctx, toolsRequest)
-166 | 		if err == nil {
-167 | 			t.Error("Expected error when making request before initialization")
-168 | 		}
-169 | 	})
-170 | 
-171 | 	// t.Run("Handles context cancellation", func(t *testing.T) {
-172 | 	// 	client, err := NewSSEMCPClient(testServer.URL + "/sse")
-173 | 	// 	if err != nil {
-174 | 	// 		t.Fatalf("Failed to create client: %v", err)
-175 | 	// 	}
-176 | 	// 	defer client.Close()
-177 | 
-178 | 	// 	if err := client.Start(context.Background()); err != nil {
-179 | 	// 		t.Fatalf("Failed to start client: %v", err)
-180 | 	// 	}
-181 | 
-182 | 	// 	ctx, cancel := context.WithCancel(context.Background())
-183 | 	// 	cancel() // Cancel immediately
-184 | 
-185 | 	// 	toolsRequest := mcp.ListToolsRequest{}
-186 | 	// 	_, err = client.ListTools(ctx, toolsRequest)
-187 | 	// 	if err == nil {
-188 | 	// 		t.Error("Expected error when context is cancelled")
-189 | 	// 	}
-190 | 	// })
-191 | 
-192 | 	t.Run("CallTool", func(t *testing.T) {
-193 | 		client, err := NewSSEMCPClient(testServer.URL + "/sse")
-194 | 		if err != nil {
-195 | 			t.Fatalf("Failed to create client: %v", err)
-196 | 		}
-197 | 		defer client.Close()
-198 | 
-199 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-200 | 		defer cancel()
+149 | 	// 	_, err = client.Initialize(ctx, initRequest)
+150 | 	// 	if err != nil {
+151 | 	// 		t.Fatalf("Failed to initialize: %v", err)
+152 | 	// 	}
+153 | 
+154 | 	// 	// Subscribe to a resource to test notifications
+155 | 	// 	subRequest := mcp.SubscribeRequest{}
+156 | 	// 	subRequest.Params.URI = "test://resource"
+157 | 	// 	if err := client.Subscribe(ctx, subRequest); err != nil {
+158 | 	// 		t.Fatalf("Failed to subscribe: %v", err)
+159 | 	// 	}
+160 | 
+161 | 	// 	select {
+162 | 	// 	case <-notificationReceived:
+163 | 	// 		// Success
+164 | 	// 	case <-time.After(time.Second):
+165 | 	// 		t.Error("Timeout waiting for notification")
+166 | 	// 	}
+167 | 	// })
+168 | 
+169 | 	t.Run("Handles errors properly", func(t *testing.T) {
+170 | 		client, err := NewSSEMCPClient(testServer.URL + "/sse")
+171 | 		if err != nil {
+172 | 			t.Fatalf("Failed to create client: %v", err)
+173 | 		}
+174 | 		defer client.Close()
+175 | 
+176 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+177 | 		defer cancel()
+178 | 
+179 | 		if err := client.Start(ctx); err != nil {
+180 | 			t.Fatalf("Failed to start client: %v", err)
+181 | 		}
+182 | 
+183 | 		// Try to make a request without initializing
+184 | 		toolsRequest := mcp.ListToolsRequest{}
+185 | 		_, err = client.ListTools(ctx, toolsRequest)
+186 | 		if err == nil {
+187 | 			t.Error("Expected error when making request before initialization")
+188 | 		}
+189 | 	})
+190 | 
+191 | 	// t.Run("Handles context cancellation", func(t *testing.T) {
+192 | 	// 	client, err := NewSSEMCPClient(testServer.URL + "/sse")
+193 | 	// 	if err != nil {
+194 | 	// 		t.Fatalf("Failed to create client: %v", err)
+195 | 	// 	}
+196 | 	// 	defer client.Close()
+197 | 
+198 | 	// 	if err := client.Start(context.Background()); err != nil {
+199 | 	// 		t.Fatalf("Failed to start client: %v", err)
+200 | 	// 	}
 201 | 
-202 | 		if err := client.Start(ctx); err != nil {
-203 | 			t.Fatalf("Failed to start client: %v", err)
-204 | 		}
-205 | 
-206 | 		// Initialize
-207 | 		initRequest := mcp.InitializeRequest{}
-208 | 		initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
-209 | 		initRequest.Params.ClientInfo = mcp.Implementation{
-210 | 			Name:    "test-client",
-211 | 			Version: "1.0.0",
-212 | 		}
-213 | 
-214 | 		_, err = client.Initialize(ctx, initRequest)
-215 | 		if err != nil {
-216 | 			t.Fatalf("Failed to initialize: %v", err)
-217 | 		}
+202 | 	// 	ctx, cancel := context.WithCancel(context.Background())
+203 | 	// 	cancel() // Cancel immediately
+204 | 
+205 | 	// 	toolsRequest := mcp.ListToolsRequest{}
+206 | 	// 	_, err = client.ListTools(ctx, toolsRequest)
+207 | 	// 	if err == nil {
+208 | 	// 		t.Error("Expected error when context is cancelled")
+209 | 	// 	}
+210 | 	// })
+211 | 
+212 | 	t.Run("CallTool", func(t *testing.T) {
+213 | 		client, err := NewSSEMCPClient(testServer.URL + "/sse")
+214 | 		if err != nil {
+215 | 			t.Fatalf("Failed to create client: %v", err)
+216 | 		}
+217 | 		defer client.Close()
 218 | 
-219 | 		request := mcp.CallToolRequest{}
-220 | 		request.Params.Name = "test-tool"
-221 | 		request.Params.Arguments = map[string]interface{}{
-222 | 			"parameter-1": "value1",
-223 | 		}
-224 | 
-225 | 		result, err := client.CallTool(ctx, request)
-226 | 		if err != nil {
-227 | 			t.Fatalf("CallTool failed: %v", err)
-228 | 		}
-229 | 
-230 | 		if len(result.Content) != 1 {
-231 | 			t.Errorf("Expected 1 content item, got %d", len(result.Content))
+219 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+220 | 		defer cancel()
+221 | 
+222 | 		if err := client.Start(ctx); err != nil {
+223 | 			t.Fatalf("Failed to start client: %v", err)
+224 | 		}
+225 | 
+226 | 		// Initialize
+227 | 		initRequest := mcp.InitializeRequest{}
+228 | 		initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+229 | 		initRequest.Params.ClientInfo = mcp.Implementation{
+230 | 			Name:    "test-client",
+231 | 			Version: "1.0.0",
 232 | 		}
-233 | 	})
-234 | }
-235 | 
+233 | 
+234 | 		_, err = client.Initialize(ctx, initRequest)
+235 | 		if err != nil {
+236 | 			t.Fatalf("Failed to initialize: %v", err)
+237 | 		}
+238 | 
+239 | 		request := mcp.CallToolRequest{}
+240 | 		request.Params.Name = "test-tool"
+241 | 		request.Params.Arguments = map[string]interface{}{
+242 | 			"parameter-1": "value1",
+243 | 		}
+244 | 
+245 | 		result, err := client.CallTool(ctx, request)
+246 | 		if err != nil {
+247 | 			t.Fatalf("CallTool failed: %v", err)
+248 | 		}
+249 | 
+250 | 		if len(result.Content) != 1 {
+251 | 			t.Errorf("Expected 1 content item, got %d", len(result.Content))
+252 | 		}
+253 | 	})
+254 | }
+255 | 
 
 
 --------------------------------------------------------------------------------
 /client/stdio.go:
 --------------------------------------------------------------------------------
-  1 | package client
-  2 | 
-  3 | import (
-  4 | 	"bufio"
-  5 | 	"context"
-  6 | 	"encoding/json"
-  7 | 	"errors"
-  8 | 	"fmt"
-  9 | 	"io"
- 10 | 	"os"
- 11 | 	"os/exec"
- 12 | 	"sync"
- 13 | 	"sync/atomic"
- 14 | 
- 15 | 	"github.com/mark3labs/mcp-go/mcp"
- 16 | )
- 17 | 
- 18 | // StdioMCPClient implements the MCPClient interface using stdio communication.
- 19 | // It launches a subprocess and communicates with it via standard input/output streams
- 20 | // using JSON-RPC messages. The client handles message routing between requests and
- 21 | // responses, and supports asynchronous notifications.
- 22 | type StdioMCPClient struct {
- 23 | 	cmd           *exec.Cmd
- 24 | 	stdin         io.WriteCloser
- 25 | 	stdout        *bufio.Reader
- 26 | 	stderr        io.ReadCloser
- 27 | 	requestID     atomic.Int64
- 28 | 	responses     map[int64]chan RPCResponse
- 29 | 	mu            sync.RWMutex
- 30 | 	done          chan struct{}
- 31 | 	initialized   bool
- 32 | 	notifications []func(mcp.JSONRPCNotification)
- 33 | 	notifyMu      sync.RWMutex
- 34 | 	capabilities  mcp.ServerCapabilities
- 35 | }
- 36 | 
- 37 | // NewStdioMCPClient creates a new stdio-based MCP client that communicates with a subprocess.
- 38 | // It launches the specified command with given arguments and sets up stdin/stdout pipes for communication.
- 39 | // Returns an error if the subprocess cannot be started or the pipes cannot be created.
- 40 | func NewStdioMCPClient(
- 41 | 	command string,
- 42 | 	env []string,
- 43 | 	args ...string,
- 44 | ) (*StdioMCPClient, error) {
- 45 | 	cmd := exec.Command(command, args...)
- 46 | 
- 47 | 	mergedEnv := os.Environ()
- 48 | 	mergedEnv = append(mergedEnv, env...)
- 49 | 
- 50 | 	cmd.Env = mergedEnv
- 51 | 
- 52 | 	stdin, err := cmd.StdinPipe()
- 53 | 	if err != nil {
- 54 | 		return nil, fmt.Errorf("failed to create stdin pipe: %w", err)
- 55 | 	}
- 56 | 
- 57 | 	stdout, err := cmd.StdoutPipe()
- 58 | 	if err != nil {
- 59 | 		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
- 60 | 	}
- 61 | 
- 62 | 	stderr, err := cmd.StderrPipe()
- 63 | 	if err != nil {
- 64 | 		return nil, fmt.Errorf("failed to create stderr pipe: %w", err)
- 65 | 	}
- 66 | 
- 67 | 	client := &StdioMCPClient{
- 68 | 		cmd:       cmd,
- 69 | 		stdin:     stdin,
- 70 | 		stderr:    stderr,
- 71 | 		stdout:    bufio.NewReader(stdout),
- 72 | 		responses: make(map[int64]chan RPCResponse),
- 73 | 		done:      make(chan struct{}),
- 74 | 	}
- 75 | 
- 76 | 	if err := cmd.Start(); err != nil {
- 77 | 		return nil, fmt.Errorf("failed to start command: %w", err)
- 78 | 	}
- 79 | 
- 80 | 	// Start reading responses in a goroutine and wait for it to be ready
- 81 | 	ready := make(chan struct{})
- 82 | 	go func() {
- 83 | 		close(ready)
- 84 | 		client.readResponses()
- 85 | 	}()
- 86 | 	<-ready
- 87 | 
- 88 | 	return client, nil
- 89 | }
- 90 | 
- 91 | // Close shuts down the stdio client, closing the stdin pipe and waiting for the subprocess to exit.
- 92 | // Returns an error if there are issues closing stdin or waiting for the subprocess to terminate.
- 93 | func (c *StdioMCPClient) Close() error {
- 94 | 	close(c.done)
- 95 | 	if err := c.stdin.Close(); err != nil {
- 96 | 		return fmt.Errorf("failed to close stdin: %w", err)
- 97 | 	}
- 98 | 	if err := c.stderr.Close(); err != nil {
- 99 | 		return fmt.Errorf("failed to close stderr: %w", err)
-100 | 	}
-101 | 	return c.cmd.Wait()
-102 | }
-103 | 
-104 | // Stderr returns a reader for the stderr output of the subprocess.
-105 | // This can be used to capture error messages or logs from the subprocess.
-106 | func (c *StdioMCPClient) Stderr() io.Reader {
-107 | 	return c.stderr
-108 | }
-109 | 
-110 | // OnNotification registers a handler function to be called when notifications are received.
-111 | // Multiple handlers can be registered and will be called in the order they were added.
-112 | func (c *StdioMCPClient) OnNotification(
-113 | 	handler func(notification mcp.JSONRPCNotification),
-114 | ) {
-115 | 	c.notifyMu.Lock()
-116 | 	defer c.notifyMu.Unlock()
-117 | 	c.notifications = append(c.notifications, handler)
-118 | }
-119 | 
-120 | // readResponses continuously reads and processes responses from the server's stdout.
-121 | // It handles both responses to requests and notifications, routing them appropriately.
-122 | // Runs until the done channel is closed or an error occurs reading from stdout.
-123 | func (c *StdioMCPClient) readResponses() {
-124 | 	for {
-125 | 		select {
-126 | 		case <-c.done:
-127 | 			return
-128 | 		default:
-129 | 			line, err := c.stdout.ReadString('\n')
-130 | 			if err != nil {
-131 | 				if err != io.EOF {
-132 | 					fmt.Printf("Error reading response: %v\n", err)
-133 | 				}
-134 | 				return
-135 | 			}
-136 | 
-137 | 			var baseMessage struct {
-138 | 				JSONRPC string          `json:"jsonrpc"`
-139 | 				ID      *int64          `json:"id,omitempty"`
-140 | 				Method  string          `json:"method,omitempty"`
-141 | 				Result  json.RawMessage `json:"result,omitempty"`
-142 | 				Error   *struct {
-143 | 					Code    int    `json:"code"`
-144 | 					Message string `json:"message"`
-145 | 				} `json:"error,omitempty"`
-146 | 			}
-147 | 
-148 | 			if err := json.Unmarshal([]byte(line), &baseMessage); err != nil {
-149 | 				continue
-150 | 			}
-151 | 
-152 | 			// Handle notification
-153 | 			if baseMessage.ID == nil {
-154 | 				var notification mcp.JSONRPCNotification
-155 | 				if err := json.Unmarshal([]byte(line), &notification); err != nil {
-156 | 					continue
-157 | 				}
-158 | 				c.notifyMu.RLock()
-159 | 				for _, handler := range c.notifications {
-160 | 					handler(notification)
-161 | 				}
-162 | 				c.notifyMu.RUnlock()
-163 | 				continue
-164 | 			}
-165 | 
-166 | 			c.mu.RLock()
-167 | 			ch, ok := c.responses[*baseMessage.ID]
-168 | 			c.mu.RUnlock()
-169 | 
-170 | 			if ok {
-171 | 				if baseMessage.Error != nil {
-172 | 					ch <- RPCResponse{
-173 | 						Error: &baseMessage.Error.Message,
-174 | 					}
-175 | 				} else {
-176 | 					ch <- RPCResponse{
-177 | 						Response: &baseMessage.Result,
-178 | 					}
-179 | 				}
-180 | 				c.mu.Lock()
-181 | 				delete(c.responses, *baseMessage.ID)
-182 | 				c.mu.Unlock()
-183 | 			}
-184 | 		}
-185 | 	}
-186 | }
-187 | 
-188 | // sendRequest sends a JSON-RPC request to the server and waits for a response.
-189 | // It creates a unique request ID, sends the request over stdin, and waits for
-190 | // the corresponding response or context cancellation.
-191 | // Returns the raw JSON response message or an error if the request fails.
-192 | func (c *StdioMCPClient) sendRequest(
-193 | 	ctx context.Context,
-194 | 	method string,
-195 | 	params interface{},
-196 | ) (*json.RawMessage, error) {
-197 | 	if !c.initialized && method != "initialize" {
-198 | 		return nil, fmt.Errorf("client not initialized")
-199 | 	}
-200 | 
-201 | 	id := c.requestID.Add(1)
-202 | 
-203 | 	// Create the complete request structure
-204 | 	request := mcp.JSONRPCRequest{
-205 | 		JSONRPC: mcp.JSONRPC_VERSION,
-206 | 		ID:      id,
-207 | 		Request: mcp.Request{
-208 | 			Method: method,
-209 | 		},
-210 | 		Params: params,
-211 | 	}
-212 | 
-213 | 	responseChan := make(chan RPCResponse, 1)
-214 | 	c.mu.Lock()
-215 | 	c.responses[id] = responseChan
-216 | 	c.mu.Unlock()
-217 | 
-218 | 	requestBytes, err := json.Marshal(request)
-219 | 	if err != nil {
-220 | 		return nil, fmt.Errorf("failed to marshal request: %w", err)
-221 | 	}
-222 | 	requestBytes = append(requestBytes, '\n')
-223 | 
-224 | 	if _, err := c.stdin.Write(requestBytes); err != nil {
-225 | 		return nil, fmt.Errorf("failed to write request: %w", err)
-226 | 	}
-227 | 
-228 | 	select {
-229 | 	case <-ctx.Done():
-230 | 		c.mu.Lock()
-231 | 		delete(c.responses, id)
-232 | 		c.mu.Unlock()
-233 | 		return nil, ctx.Err()
-234 | 	case response := <-responseChan:
-235 | 		if response.Error != nil {
-236 | 			return nil, errors.New(*response.Error)
-237 | 		}
-238 | 		return response.Response, nil
-239 | 	}
-240 | }
-241 | 
-242 | func (c *StdioMCPClient) Ping(ctx context.Context) error {
-243 | 	_, err := c.sendRequest(ctx, "ping", nil)
-244 | 	return err
-245 | }
-246 | 
-247 | func (c *StdioMCPClient) Initialize(
-248 | 	ctx context.Context,
-249 | 	request mcp.InitializeRequest,
-250 | ) (*mcp.InitializeResult, error) {
-251 | 	// This structure ensures Capabilities is always included in JSON
-252 | 	params := struct {
-253 | 		ProtocolVersion string                 `json:"protocolVersion"`
-254 | 		ClientInfo      mcp.Implementation     `json:"clientInfo"`
-255 | 		Capabilities    mcp.ClientCapabilities `json:"capabilities"`
-256 | 	}{
-257 | 		ProtocolVersion: request.Params.ProtocolVersion,
-258 | 		ClientInfo:      request.Params.ClientInfo,
-259 | 		Capabilities:    request.Params.Capabilities, // Will be empty struct if not set
-260 | 	}
-261 | 
-262 | 	response, err := c.sendRequest(ctx, "initialize", params)
-263 | 	if err != nil {
-264 | 		return nil, err
-265 | 	}
-266 | 
-267 | 	var result mcp.InitializeResult
-268 | 	if err := json.Unmarshal(*response, &result); err != nil {
-269 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-270 | 	}
-271 | 
-272 | 	// Store capabilities
-273 | 	c.capabilities = result.Capabilities
-274 | 
-275 | 	// Send initialized notification
-276 | 	notification := mcp.JSONRPCNotification{
-277 | 		JSONRPC: mcp.JSONRPC_VERSION,
-278 | 		Notification: mcp.Notification{
-279 | 			Method: "notifications/initialized",
-280 | 		},
-281 | 	}
-282 | 
-283 | 	notificationBytes, err := json.Marshal(notification)
-284 | 	if err != nil {
-285 | 		return nil, fmt.Errorf(
-286 | 			"failed to marshal initialized notification: %w",
-287 | 			err,
-288 | 		)
-289 | 	}
-290 | 	notificationBytes = append(notificationBytes, '\n')
-291 | 
-292 | 	if _, err := c.stdin.Write(notificationBytes); err != nil {
-293 | 		return nil, fmt.Errorf(
-294 | 			"failed to send initialized notification: %w",
-295 | 			err,
-296 | 		)
-297 | 	}
-298 | 
-299 | 	c.initialized = true
-300 | 	return &result, nil
-301 | }
-302 | 
-303 | // ListResourcesByPage manually list resources by page.
-304 | func (c *StdioMCPClient) ListResourcesByPage(
-305 | 	ctx context.Context,
-306 | 	request mcp.ListResourcesRequest,
-307 | ) (*mcp.ListResourcesResult, error) {
-308 | 	result, err := listByPage[mcp.ListResourcesResult](ctx, c, request.PaginatedRequest, "resources/list")
-309 | 	if err != nil {
-310 | 		return nil, err
-311 | 	}
-312 | 	return result, nil
-313 | }
-314 | 
-315 | func (c *StdioMCPClient) ListResources(
-316 | 	ctx context.Context,
-317 | 	request mcp.ListResourcesRequest,
-318 | ) (*mcp.ListResourcesResult, error) {
-319 | 	result, err := c.ListResourcesByPage(ctx, request)
-320 | 	if err != nil {
-321 | 		return nil, err
-322 | 	}
-323 | 	for result.NextCursor != "" {
-324 | 		select {
-325 | 		case <-ctx.Done():
-326 | 			return nil, ctx.Err()
-327 | 		default:
-328 | 			request.Params.Cursor = result.NextCursor
-329 | 			newPageRes, err := c.ListResourcesByPage(ctx, request)
-330 | 			if err != nil {
-331 | 				return nil, err
-332 | 			}
-333 | 			result.Resources = append(result.Resources, newPageRes.Resources...)
-334 | 			result.NextCursor = newPageRes.NextCursor
-335 | 		}
-336 | 	}
-337 | 	return result, nil
-338 | }
-339 | 
-340 | func (c *StdioMCPClient) ListResourceTemplatesByPage(
-341 | 	ctx context.Context,
-342 | 	request mcp.ListResourceTemplatesRequest,
-343 | ) (*mcp.ListResourceTemplatesResult, error) {
-344 | 	result, err := listByPage[mcp.ListResourceTemplatesResult](ctx, c, request.PaginatedRequest, "resources/templates/list")
-345 | 	if err != nil {
-346 | 		return nil, err
-347 | 	}
-348 | 	return result, nil
-349 | }
-350 | 
-351 | func (c *StdioMCPClient) ListResourceTemplates(
-352 | 	ctx context.Context,
-353 | 	request mcp.ListResourceTemplatesRequest,
-354 | ) (*mcp.ListResourceTemplatesResult, error) {
-355 | 	result, err := c.ListResourceTemplatesByPage(ctx, request)
-356 | 	if err != nil {
-357 | 		return nil, err
-358 | 	}
-359 | 	for result.NextCursor != "" {
-360 | 		select {
-361 | 		case <-ctx.Done():
-362 | 			return nil, ctx.Err()
-363 | 		default:
-364 | 			request.Params.Cursor = result.NextCursor
-365 | 			newPageRes, err := c.ListResourceTemplatesByPage(ctx, request)
-366 | 			if err != nil {
-367 | 				return nil, err
-368 | 			}
-369 | 			result.ResourceTemplates = append(result.ResourceTemplates, newPageRes.ResourceTemplates...)
-370 | 			result.NextCursor = newPageRes.NextCursor
-371 | 		}
-372 | 	}
-373 | 	return result, nil
-374 | }
-375 | 
-376 | func (c *StdioMCPClient) ReadResource(
-377 | 	ctx context.Context,
-378 | 	request mcp.ReadResourceRequest,
-379 | ) (*mcp.ReadResourceResult,
-380 | 	error) {
-381 | 	response, err := c.sendRequest(ctx, "resources/read", request.Params)
-382 | 	if err != nil {
-383 | 		return nil, err
-384 | 	}
-385 | 
-386 | 	return mcp.ParseReadResourceResult(response)
-387 | }
-388 | 
-389 | func (c *StdioMCPClient) Subscribe(
-390 | 	ctx context.Context,
-391 | 	request mcp.SubscribeRequest,
-392 | ) error {
-393 | 	_, err := c.sendRequest(ctx, "resources/subscribe", request.Params)
-394 | 	return err
-395 | }
-396 | 
-397 | func (c *StdioMCPClient) Unsubscribe(
-398 | 	ctx context.Context,
-399 | 	request mcp.UnsubscribeRequest,
-400 | ) error {
-401 | 	_, err := c.sendRequest(ctx, "resources/unsubscribe", request.Params)
-402 | 	return err
-403 | }
-404 | 
-405 | func (c *StdioMCPClient) ListPromptsByPage(
-406 | 	ctx context.Context,
-407 | 	request mcp.ListPromptsRequest,
-408 | ) (*mcp.ListPromptsResult, error) {
-409 | 	result, err := listByPage[mcp.ListPromptsResult](ctx, c, request.PaginatedRequest, "prompts/list")
-410 | 	if err != nil {
-411 | 		return nil, err
-412 | 	}
-413 | 	return result, nil
-414 | }
-415 | 
-416 | func (c *StdioMCPClient) ListPrompts(
-417 | 	ctx context.Context,
-418 | 	request mcp.ListPromptsRequest,
-419 | ) (*mcp.ListPromptsResult, error) {
-420 | 	result, err := c.ListPromptsByPage(ctx, request)
-421 | 	if err != nil {
-422 | 		return nil, err
-423 | 	}
-424 | 	for result.NextCursor != "" {
-425 | 		select {
-426 | 		case <-ctx.Done():
-427 | 			return nil, ctx.Err()
-428 | 		default:
-429 | 			request.Params.Cursor = result.NextCursor
-430 | 			newPageRes, err := c.ListPromptsByPage(ctx, request)
-431 | 			if err != nil {
-432 | 				return nil, err
-433 | 			}
-434 | 			result.Prompts = append(result.Prompts, newPageRes.Prompts...)
-435 | 			result.NextCursor = newPageRes.NextCursor
-436 | 		}
-437 | 	}
-438 | 	return result, nil
-439 | }
-440 | 
-441 | func (c *StdioMCPClient) GetPrompt(
-442 | 	ctx context.Context,
-443 | 	request mcp.GetPromptRequest,
-444 | ) (*mcp.GetPromptResult, error) {
-445 | 	response, err := c.sendRequest(ctx, "prompts/get", request.Params)
-446 | 	if err != nil {
-447 | 		return nil, err
-448 | 	}
-449 | 
-450 | 	return mcp.ParseGetPromptResult(response)
-451 | }
-452 | 
-453 | func (c *StdioMCPClient) ListToolsByPage(
-454 | 	ctx context.Context,
-455 | 	request mcp.ListToolsRequest,
-456 | ) (*mcp.ListToolsResult, error) {
-457 | 	result, err := listByPage[mcp.ListToolsResult](ctx, c, request.PaginatedRequest, "tools/list")
-458 | 	if err != nil {
-459 | 		return nil, err
-460 | 	}
-461 | 	return result, nil
-462 | }
-463 | 
-464 | func (c *StdioMCPClient) ListTools(
-465 | 	ctx context.Context,
-466 | 	request mcp.ListToolsRequest,
-467 | ) (*mcp.ListToolsResult, error) {
-468 | 	result, err := c.ListToolsByPage(ctx, request)
-469 | 	if err != nil {
-470 | 		return nil, err
-471 | 	}
-472 | 	for result.NextCursor != "" {
-473 | 		select {
-474 | 		case <-ctx.Done():
-475 | 			return nil, ctx.Err()
-476 | 		default:
-477 | 			request.Params.Cursor = result.NextCursor
-478 | 			newPageRes, err := c.ListToolsByPage(ctx, request)
-479 | 			if err != nil {
-480 | 				return nil, err
-481 | 			}
-482 | 			result.Tools = append(result.Tools, newPageRes.Tools...)
-483 | 			result.NextCursor = newPageRes.NextCursor
-484 | 		}
-485 | 	}
-486 | 	return result, nil
-487 | }
-488 | 
-489 | func (c *StdioMCPClient) CallTool(
-490 | 	ctx context.Context,
-491 | 	request mcp.CallToolRequest,
-492 | ) (*mcp.CallToolResult, error) {
-493 | 	response, err := c.sendRequest(ctx, "tools/call", request.Params)
-494 | 	if err != nil {
-495 | 		return nil, err
-496 | 	}
-497 | 
-498 | 	return mcp.ParseCallToolResult(response)
-499 | }
-500 | 
-501 | func (c *StdioMCPClient) SetLevel(
-502 | 	ctx context.Context,
-503 | 	request mcp.SetLevelRequest,
-504 | ) error {
-505 | 	_, err := c.sendRequest(ctx, "logging/setLevel", request.Params)
-506 | 	return err
-507 | }
-508 | 
-509 | func (c *StdioMCPClient) Complete(
-510 | 	ctx context.Context,
-511 | 	request mcp.CompleteRequest,
-512 | ) (*mcp.CompleteResult, error) {
-513 | 	response, err := c.sendRequest(ctx, "completion/complete", request.Params)
-514 | 	if err != nil {
-515 | 		return nil, err
-516 | 	}
-517 | 
-518 | 	var result mcp.CompleteResult
-519 | 	if err := json.Unmarshal(*response, &result); err != nil {
-520 | 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-521 | 	}
-522 | 
-523 | 	return &result, nil
-524 | }
-525 | 
+ 1 | package client
+ 2 | 
+ 3 | import (
+ 4 | 	"context"
+ 5 | 	"fmt"
+ 6 | 	"io"
+ 7 | 
+ 8 | 	"github.com/mark3labs/mcp-go/client/transport"
+ 9 | )
+10 | 
+11 | // NewStdioMCPClient creates a new stdio-based MCP client that communicates with a subprocess.
+12 | // It launches the specified command with given arguments and sets up stdin/stdout pipes for communication.
+13 | // Returns an error if the subprocess cannot be started or the pipes cannot be created.
+14 | //
+15 | // NOTICE: NewStdioMCPClient will start the connection automatically. Don't call the Start method manually.
+16 | // This is for backward compatibility.
+17 | func NewStdioMCPClient(
+18 | 	command string,
+19 | 	env []string,
+20 | 	args ...string,
+21 | ) (*Client, error) {
+22 | 
+23 | 	stdioTransport := transport.NewStdio(command, env, args...)
+24 | 	err := stdioTransport.Start(context.Background())
+25 | 	if err != nil {
+26 | 		return nil, fmt.Errorf("failed to start stdio transport: %w", err)
+27 | 	}
+28 | 
+29 | 	return NewClient(stdioTransport), nil
+30 | }
+31 | 
+32 | // GetStderr returns a reader for the stderr output of the subprocess.
+33 | // This can be used to capture error messages or logs from the subprocess.
+34 | func GetStderr(c *Client) (io.Reader, bool) {
+35 | 	t := c.GetTransport()
+36 | 
+37 | 	stdio, ok := t.(*transport.Stdio)
+38 | 	if !ok {
+39 | 		return nil, false
+40 | 	}
+41 | 
+42 | 	return stdio.Stderr(), true
+43 | }
+44 | 
 
 
 --------------------------------------------------------------------------------
@@ -1627,253 +1426,2697 @@
  47 | 	wg.Add(1)
  48 | 	go func() {
  49 | 		defer wg.Done()
- 50 | 		dec := json.NewDecoder(client.Stderr())
- 51 | 		for {
- 52 | 			var record map[string]any
- 53 | 			if err := dec.Decode(&record); err != nil {
- 54 | 				return
- 55 | 			}
- 56 | 			logRecordsMu.Lock()
- 57 | 			logRecords = append(logRecords, record)
- 58 | 			logRecordsMu.Unlock()
- 59 | 		}
- 60 | 	}()
- 61 | 
- 62 | 	t.Run("Initialize", func(t *testing.T) {
- 63 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
- 64 | 		defer cancel()
- 65 | 
- 66 | 		request := mcp.InitializeRequest{}
- 67 | 		request.Params.ProtocolVersion = "1.0"
- 68 | 		request.Params.ClientInfo = mcp.Implementation{
- 69 | 			Name:    "test-client",
- 70 | 			Version: "1.0.0",
- 71 | 		}
- 72 | 		request.Params.Capabilities = mcp.ClientCapabilities{
- 73 | 			Roots: &struct {
- 74 | 				ListChanged bool `json:"listChanged,omitempty"`
- 75 | 			}{
- 76 | 				ListChanged: true,
- 77 | 			},
- 78 | 		}
- 79 | 
- 80 | 		result, err := client.Initialize(ctx, request)
- 81 | 		if err != nil {
- 82 | 			t.Fatalf("Initialize failed: %v", err)
- 83 | 		}
- 84 | 
- 85 | 		if result.ServerInfo.Name != "mock-server" {
- 86 | 			t.Errorf(
- 87 | 				"Expected server name 'mock-server', got '%s'",
- 88 | 				result.ServerInfo.Name,
- 89 | 			)
- 90 | 		}
- 91 | 	})
- 92 | 
- 93 | 	t.Run("Ping", func(t *testing.T) {
- 94 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
- 95 | 		defer cancel()
- 96 | 
- 97 | 		err := client.Ping(ctx)
- 98 | 		if err != nil {
- 99 | 			t.Errorf("Ping failed: %v", err)
-100 | 		}
-101 | 	})
+ 50 | 
+ 51 | 		stderr, ok := GetStderr(client)
+ 52 | 		if !ok {
+ 53 | 			return
+ 54 | 		}
+ 55 | 
+ 56 | 		dec := json.NewDecoder(stderr)
+ 57 | 		for {
+ 58 | 			var record map[string]any
+ 59 | 			if err := dec.Decode(&record); err != nil {
+ 60 | 				return
+ 61 | 			}
+ 62 | 			logRecordsMu.Lock()
+ 63 | 			logRecords = append(logRecords, record)
+ 64 | 			logRecordsMu.Unlock()
+ 65 | 		}
+ 66 | 	}()
+ 67 | 
+ 68 | 	t.Run("Initialize", func(t *testing.T) {
+ 69 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+ 70 | 		defer cancel()
+ 71 | 
+ 72 | 		request := mcp.InitializeRequest{}
+ 73 | 		request.Params.ProtocolVersion = "1.0"
+ 74 | 		request.Params.ClientInfo = mcp.Implementation{
+ 75 | 			Name:    "test-client",
+ 76 | 			Version: "1.0.0",
+ 77 | 		}
+ 78 | 		request.Params.Capabilities = mcp.ClientCapabilities{
+ 79 | 			Roots: &struct {
+ 80 | 				ListChanged bool `json:"listChanged,omitempty"`
+ 81 | 			}{
+ 82 | 				ListChanged: true,
+ 83 | 			},
+ 84 | 		}
+ 85 | 
+ 86 | 		result, err := client.Initialize(ctx, request)
+ 87 | 		if err != nil {
+ 88 | 			t.Fatalf("Initialize failed: %v", err)
+ 89 | 		}
+ 90 | 
+ 91 | 		if result.ServerInfo.Name != "mock-server" {
+ 92 | 			t.Errorf(
+ 93 | 				"Expected server name 'mock-server', got '%s'",
+ 94 | 				result.ServerInfo.Name,
+ 95 | 			)
+ 96 | 		}
+ 97 | 	})
+ 98 | 
+ 99 | 	t.Run("Ping", func(t *testing.T) {
+100 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+101 | 		defer cancel()
 102 | 
-103 | 	t.Run("ListResources", func(t *testing.T) {
-104 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-105 | 		defer cancel()
-106 | 
-107 | 		request := mcp.ListResourcesRequest{}
-108 | 		result, err := client.ListResources(ctx, request)
-109 | 		if err != nil {
-110 | 			t.Errorf("ListResources failed: %v", err)
-111 | 		}
+103 | 		err := client.Ping(ctx)
+104 | 		if err != nil {
+105 | 			t.Errorf("Ping failed: %v", err)
+106 | 		}
+107 | 	})
+108 | 
+109 | 	t.Run("ListResources", func(t *testing.T) {
+110 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+111 | 		defer cancel()
 112 | 
-113 | 		if len(result.Resources) != 1 {
-114 | 			t.Errorf("Expected 1 resource, got %d", len(result.Resources))
+113 | 		request := mcp.ListResourcesRequest{}
+114 | 		result, err := client.ListResources(ctx, request)
+115 | 		if err != nil {
+116 | 			t.Errorf("ListResources failed: %v", err)
+117 | 		}
+118 | 
+119 | 		if len(result.Resources) != 1 {
+120 | 			t.Errorf("Expected 1 resource, got %d", len(result.Resources))
+121 | 		}
+122 | 	})
+123 | 
+124 | 	t.Run("ReadResource", func(t *testing.T) {
+125 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+126 | 		defer cancel()
+127 | 
+128 | 		request := mcp.ReadResourceRequest{}
+129 | 		request.Params.URI = "test://resource"
+130 | 
+131 | 		result, err := client.ReadResource(ctx, request)
+132 | 		if err != nil {
+133 | 			t.Errorf("ReadResource failed: %v", err)
+134 | 		}
+135 | 
+136 | 		if len(result.Contents) != 1 {
+137 | 			t.Errorf("Expected 1 content item, got %d", len(result.Contents))
+138 | 		}
+139 | 	})
+140 | 
+141 | 	t.Run("Subscribe and Unsubscribe", func(t *testing.T) {
+142 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+143 | 		defer cancel()
+144 | 
+145 | 		// Test Subscribe
+146 | 		subRequest := mcp.SubscribeRequest{}
+147 | 		subRequest.Params.URI = "test://resource"
+148 | 		err := client.Subscribe(ctx, subRequest)
+149 | 		if err != nil {
+150 | 			t.Errorf("Subscribe failed: %v", err)
+151 | 		}
+152 | 
+153 | 		// Test Unsubscribe
+154 | 		unsubRequest := mcp.UnsubscribeRequest{}
+155 | 		unsubRequest.Params.URI = "test://resource"
+156 | 		err = client.Unsubscribe(ctx, unsubRequest)
+157 | 		if err != nil {
+158 | 			t.Errorf("Unsubscribe failed: %v", err)
+159 | 		}
+160 | 	})
+161 | 
+162 | 	t.Run("ListPrompts", func(t *testing.T) {
+163 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+164 | 		defer cancel()
+165 | 
+166 | 		request := mcp.ListPromptsRequest{}
+167 | 		result, err := client.ListPrompts(ctx, request)
+168 | 		if err != nil {
+169 | 			t.Errorf("ListPrompts failed: %v", err)
+170 | 		}
+171 | 
+172 | 		if len(result.Prompts) != 1 {
+173 | 			t.Errorf("Expected 1 prompt, got %d", len(result.Prompts))
+174 | 		}
+175 | 	})
+176 | 
+177 | 	t.Run("GetPrompt", func(t *testing.T) {
+178 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+179 | 		defer cancel()
+180 | 
+181 | 		request := mcp.GetPromptRequest{}
+182 | 		request.Params.Name = "test-prompt"
+183 | 
+184 | 		result, err := client.GetPrompt(ctx, request)
+185 | 		if err != nil {
+186 | 			t.Errorf("GetPrompt failed: %v", err)
+187 | 		}
+188 | 
+189 | 		if len(result.Messages) != 1 {
+190 | 			t.Errorf("Expected 1 message, got %d", len(result.Messages))
+191 | 		}
+192 | 	})
+193 | 
+194 | 	t.Run("ListTools", func(t *testing.T) {
+195 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+196 | 		defer cancel()
+197 | 
+198 | 		request := mcp.ListToolsRequest{}
+199 | 		result, err := client.ListTools(ctx, request)
+200 | 		if err != nil {
+201 | 			t.Errorf("ListTools failed: %v", err)
+202 | 		}
+203 | 
+204 | 		if len(result.Tools) != 1 {
+205 | 			t.Errorf("Expected 1 tool, got %d", len(result.Tools))
+206 | 		}
+207 | 	})
+208 | 
+209 | 	t.Run("CallTool", func(t *testing.T) {
+210 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+211 | 		defer cancel()
+212 | 
+213 | 		request := mcp.CallToolRequest{}
+214 | 		request.Params.Name = "test-tool"
+215 | 		request.Params.Arguments = map[string]interface{}{
+216 | 			"param1": "value1",
+217 | 		}
+218 | 
+219 | 		result, err := client.CallTool(ctx, request)
+220 | 		if err != nil {
+221 | 			t.Errorf("CallTool failed: %v", err)
+222 | 		}
+223 | 
+224 | 		if len(result.Content) != 1 {
+225 | 			t.Errorf("Expected 1 content item, got %d", len(result.Content))
+226 | 		}
+227 | 	})
+228 | 
+229 | 	t.Run("SetLevel", func(t *testing.T) {
+230 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+231 | 		defer cancel()
+232 | 
+233 | 		request := mcp.SetLevelRequest{}
+234 | 		request.Params.Level = mcp.LoggingLevelInfo
+235 | 
+236 | 		err := client.SetLevel(ctx, request)
+237 | 		if err != nil {
+238 | 			t.Errorf("SetLevel failed: %v", err)
+239 | 		}
+240 | 	})
+241 | 
+242 | 	t.Run("Complete", func(t *testing.T) {
+243 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+244 | 		defer cancel()
+245 | 
+246 | 		request := mcp.CompleteRequest{}
+247 | 		request.Params.Ref = mcp.PromptReference{
+248 | 			Type: "ref/prompt",
+249 | 			Name: "test-prompt",
+250 | 		}
+251 | 		request.Params.Argument.Name = "test-arg"
+252 | 		request.Params.Argument.Value = "test-value"
+253 | 
+254 | 		result, err := client.Complete(ctx, request)
+255 | 		if err != nil {
+256 | 			t.Errorf("Complete failed: %v", err)
+257 | 		}
+258 | 
+259 | 		if len(result.Completion.Values) != 1 {
+260 | 			t.Errorf(
+261 | 				"Expected 1 completion value, got %d",
+262 | 				len(result.Completion.Values),
+263 | 			)
+264 | 		}
+265 | 	})
+266 | 
+267 | 	client.Close()
+268 | 	wg.Wait()
+269 | 
+270 | 	t.Run("CheckLogs", func(t *testing.T) {
+271 | 		logRecordsMu.RLock()
+272 | 		defer logRecordsMu.RUnlock()
+273 | 
+274 | 		if len(logRecords) != 1 {
+275 | 			t.Errorf("Expected 1 log record, got %d", len(logRecords))
+276 | 			return
+277 | 		}
+278 | 
+279 | 		msg, ok := logRecords[0][slog.MessageKey].(string)
+280 | 		if !ok {
+281 | 			t.Errorf("Expected log record to have message key")
+282 | 		}
+283 | 		if msg != "launch successful" {
+284 | 			t.Errorf("Expected log message 'launch successful', got '%s'", msg)
+285 | 		}
+286 | 	})
+287 | }
+288 | 
+
+
+--------------------------------------------------------------------------------
+/client/transport/inprocess.go:
+--------------------------------------------------------------------------------
+ 1 | package transport
+ 2 | 
+ 3 | import (
+ 4 | 	"context"
+ 5 | 	"encoding/json"
+ 6 | 	"fmt"
+ 7 | 	"sync"
+ 8 | 
+ 9 | 	"github.com/mark3labs/mcp-go/mcp"
+10 | 	"github.com/mark3labs/mcp-go/server"
+11 | )
+12 | 
+13 | type InProcessTransport struct {
+14 | 	server *server.MCPServer
+15 | 
+16 | 	onNotification func(mcp.JSONRPCNotification)
+17 | 	notifyMu       sync.RWMutex
+18 | }
+19 | 
+20 | func NewInProcessTransport(server *server.MCPServer) *InProcessTransport {
+21 | 	return &InProcessTransport{
+22 | 		server: server,
+23 | 	}
+24 | }
+25 | 
+26 | func (c *InProcessTransport) Start(ctx context.Context) error {
+27 | 	return nil
+28 | }
+29 | 
+30 | func (c *InProcessTransport) SendRequest(ctx context.Context, request JSONRPCRequest) (*JSONRPCResponse, error) {
+31 | 	requestBytes, err := json.Marshal(request)
+32 | 	if err != nil {
+33 | 		return nil, fmt.Errorf("failed to marshal request: %w", err)
+34 | 	}
+35 | 	requestBytes = append(requestBytes, '\n')
+36 | 
+37 | 	respMessage := c.server.HandleMessage(ctx, requestBytes)
+38 | 	respByte, err := json.Marshal(respMessage)
+39 | 	if err != nil {
+40 | 		return nil, fmt.Errorf("failed to marshal response message: %w", err)
+41 | 	}
+42 | 	rpcResp := JSONRPCResponse{}
+43 | 	err = json.Unmarshal(respByte, &rpcResp)
+44 | 	if err != nil {
+45 | 		return nil, fmt.Errorf("failed to unmarshal response message: %w", err)
+46 | 	}
+47 | 
+48 | 	return &rpcResp, nil
+49 | }
+50 | 
+51 | func (c *InProcessTransport) SendNotification(ctx context.Context, notification mcp.JSONRPCNotification) error {
+52 | 	notificationBytes, err := json.Marshal(notification)
+53 | 	if err != nil {
+54 | 		return fmt.Errorf("failed to marshal notification: %w", err)
+55 | 	}
+56 | 	notificationBytes = append(notificationBytes, '\n')
+57 | 	c.server.HandleMessage(ctx, notificationBytes)
+58 | 
+59 | 	return nil
+60 | }
+61 | 
+62 | func (c *InProcessTransport) SetNotificationHandler(handler func(notification mcp.JSONRPCNotification)) {
+63 | 	c.notifyMu.Lock()
+64 | 	defer c.notifyMu.Unlock()
+65 | 	c.onNotification = handler
+66 | }
+67 | 
+68 | func (*InProcessTransport) Close() error {
+69 | 	return nil
+70 | }
+71 | 
+
+
+--------------------------------------------------------------------------------
+/client/transport/interface.go:
+--------------------------------------------------------------------------------
+ 1 | package transport
+ 2 | 
+ 3 | import (
+ 4 | 	"context"
+ 5 | 	"encoding/json"
+ 6 | 
+ 7 | 	"github.com/mark3labs/mcp-go/mcp"
+ 8 | )
+ 9 | 
+10 | // Interface for the transport layer.
+11 | type Interface interface {
+12 | 	// Start the connection. Start should only be called once.
+13 | 	Start(ctx context.Context) error
+14 | 
+15 | 	// SendRequest sends a json RPC request and returns the response synchronously.
+16 | 	SendRequest(ctx context.Context, request JSONRPCRequest) (*JSONRPCResponse, error)
+17 | 
+18 | 	// SendNotification sends a json RPC Notification to the server.
+19 | 	SendNotification(ctx context.Context, notification mcp.JSONRPCNotification) error
+20 | 
+21 | 	// SetNotificationHandler sets the handler for notifications.
+22 | 	// Any notification before the handler is set will be discarded.
+23 | 	SetNotificationHandler(handler func(notification mcp.JSONRPCNotification))
+24 | 
+25 | 	// Close the connection.
+26 | 	Close() error
+27 | }
+28 | 
+29 | type JSONRPCRequest struct {
+30 | 	JSONRPC string `json:"jsonrpc"`
+31 | 	ID      int64  `json:"id"`
+32 | 	Method  string `json:"method"`
+33 | 	Params  any    `json:"params,omitempty"`
+34 | }
+35 | 
+36 | type JSONRPCResponse struct {
+37 | 	JSONRPC string          `json:"jsonrpc"`
+38 | 	ID      *int64          `json:"id"`
+39 | 	Result  json.RawMessage `json:"result"`
+40 | 	Error   *struct {
+41 | 		Code    int             `json:"code"`
+42 | 		Message string          `json:"message"`
+43 | 		Data    json.RawMessage `json:"data"`
+44 | 	} `json:"error"`
+45 | }
+46 | 
+
+
+--------------------------------------------------------------------------------
+/client/transport/sse.go:
+--------------------------------------------------------------------------------
+  1 | package transport
+  2 | 
+  3 | import (
+  4 | 	"bufio"
+  5 | 	"bytes"
+  6 | 	"context"
+  7 | 	"encoding/json"
+  8 | 	"fmt"
+  9 | 	"io"
+ 10 | 	"net/http"
+ 11 | 	"net/url"
+ 12 | 	"strings"
+ 13 | 	"sync"
+ 14 | 	"sync/atomic"
+ 15 | 	"time"
+ 16 | 
+ 17 | 	"github.com/mark3labs/mcp-go/mcp"
+ 18 | )
+ 19 | 
+ 20 | // SSE implements the transport layer of the MCP protocol using Server-Sent Events (SSE).
+ 21 | // It maintains a persistent HTTP connection to receive server-pushed events
+ 22 | // while sending requests over regular HTTP POST calls. The client handles
+ 23 | // automatic reconnection and message routing between requests and responses.
+ 24 | type SSE struct {
+ 25 | 	baseURL        *url.URL
+ 26 | 	endpoint       *url.URL
+ 27 | 	httpClient     *http.Client
+ 28 | 	responses      map[int64]chan *JSONRPCResponse
+ 29 | 	mu             sync.RWMutex
+ 30 | 	onNotification func(mcp.JSONRPCNotification)
+ 31 | 	notifyMu       sync.RWMutex
+ 32 | 	endpointChan   chan struct{}
+ 33 | 	headers        map[string]string
+ 34 | 
+ 35 | 	started         atomic.Bool
+ 36 | 	closed          atomic.Bool
+ 37 | 	cancelSSEStream context.CancelFunc
+ 38 | }
+ 39 | 
+ 40 | type ClientOption func(*SSE)
+ 41 | 
+ 42 | func WithHeaders(headers map[string]string) ClientOption {
+ 43 | 	return func(sc *SSE) {
+ 44 | 		sc.headers = headers
+ 45 | 	}
+ 46 | }
+ 47 | 
+ 48 | // NewSSE creates a new SSE-based MCP client with the given base URL.
+ 49 | // Returns an error if the URL is invalid.
+ 50 | func NewSSE(baseURL string, options ...ClientOption) (*SSE, error) {
+ 51 | 	parsedURL, err := url.Parse(baseURL)
+ 52 | 	if err != nil {
+ 53 | 		return nil, fmt.Errorf("invalid URL: %w", err)
+ 54 | 	}
+ 55 | 
+ 56 | 	smc := &SSE{
+ 57 | 		baseURL:      parsedURL,
+ 58 | 		httpClient:   &http.Client{},
+ 59 | 		responses:    make(map[int64]chan *JSONRPCResponse),
+ 60 | 		endpointChan: make(chan struct{}),
+ 61 | 		headers:      make(map[string]string),
+ 62 | 	}
+ 63 | 
+ 64 | 	for _, opt := range options {
+ 65 | 		opt(smc)
+ 66 | 	}
+ 67 | 
+ 68 | 	return smc, nil
+ 69 | }
+ 70 | 
+ 71 | // Start initiates the SSE connection to the server and waits for the endpoint information.
+ 72 | // Returns an error if the connection fails or times out waiting for the endpoint.
+ 73 | func (c *SSE) Start(ctx context.Context) error {
+ 74 | 
+ 75 | 	if c.started.Load() {
+ 76 | 		return fmt.Errorf("has already started")
+ 77 | 	}
+ 78 | 
+ 79 | 	ctx, cancel := context.WithCancel(ctx)
+ 80 | 	c.cancelSSEStream = cancel
+ 81 | 
+ 82 | 	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL.String(), nil)
+ 83 | 
+ 84 | 	if err != nil {
+ 85 | 		return fmt.Errorf("failed to create request: %w", err)
+ 86 | 	}
+ 87 | 
+ 88 | 	req.Header.Set("Accept", "text/event-stream")
+ 89 | 	req.Header.Set("Cache-Control", "no-cache")
+ 90 | 	req.Header.Set("Connection", "keep-alive")
+ 91 | 
+ 92 | 	// set custom http headers
+ 93 | 	for k, v := range c.headers {
+ 94 | 		req.Header.Set(k, v)
+ 95 | 	}
+ 96 | 
+ 97 | 	resp, err := c.httpClient.Do(req)
+ 98 | 	if err != nil {
+ 99 | 		return fmt.Errorf("failed to connect to SSE stream: %w", err)
+100 | 	}
+101 | 
+102 | 	if resp.StatusCode != http.StatusOK {
+103 | 		resp.Body.Close()
+104 | 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+105 | 	}
+106 | 
+107 | 	go c.readSSE(resp.Body)
+108 | 
+109 | 	// Wait for the endpoint to be received
+110 | 	timeout := time.NewTimer(30 * time.Second)
+111 | 	defer timeout.Stop()
+112 | 	select {
+113 | 	case <-c.endpointChan:
+114 | 		// Endpoint received, proceed
+115 | 	case <-ctx.Done():
+116 | 		return fmt.Errorf("context cancelled while waiting for endpoint")
+117 | 	case <-timeout.C: // Add a timeout
+118 | 		cancel()
+119 | 		return fmt.Errorf("timeout waiting for endpoint")
+120 | 	}
+121 | 
+122 | 	c.started.Store(true)
+123 | 	return nil
+124 | }
+125 | 
+126 | // readSSE continuously reads the SSE stream and processes events.
+127 | // It runs until the connection is closed or an error occurs.
+128 | func (c *SSE) readSSE(reader io.ReadCloser) {
+129 | 	defer reader.Close()
+130 | 
+131 | 	br := bufio.NewReader(reader)
+132 | 	var event, data string
+133 | 
+134 | 	for {
+135 | 		// when close or start's ctx cancel, the reader will be closed
+136 | 		// and the for loop will break.
+137 | 		line, err := br.ReadString('\n')
+138 | 		if err != nil {
+139 | 			if err == io.EOF {
+140 | 				// Process any pending event before exit
+141 | 				if event != "" && data != "" {
+142 | 					c.handleSSEEvent(event, data)
+143 | 				}
+144 | 				break
+145 | 			}
+146 | 			if !c.closed.Load() {
+147 | 				fmt.Printf("SSE stream error: %v\n", err)
+148 | 			}
+149 | 			return
+150 | 		}
+151 | 
+152 | 		// Remove only newline markers
+153 | 		line = strings.TrimRight(line, "\r\n")
+154 | 		if line == "" {
+155 | 			// Empty line means end of event
+156 | 			if event != "" && data != "" {
+157 | 				c.handleSSEEvent(event, data)
+158 | 				event = ""
+159 | 				data = ""
+160 | 			}
+161 | 			continue
+162 | 		}
+163 | 
+164 | 		if strings.HasPrefix(line, "event:") {
+165 | 			event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+166 | 		} else if strings.HasPrefix(line, "data:") {
+167 | 			data = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+168 | 		}
+169 | 	}
+170 | }
+171 | 
+172 | // handleSSEEvent processes SSE events based on their type.
+173 | // Handles 'endpoint' events for connection setup and 'message' events for JSON-RPC communication.
+174 | func (c *SSE) handleSSEEvent(event, data string) {
+175 | 	switch event {
+176 | 	case "endpoint":
+177 | 		endpoint, err := c.baseURL.Parse(data)
+178 | 		if err != nil {
+179 | 			fmt.Printf("Error parsing endpoint URL: %v\n", err)
+180 | 			return
+181 | 		}
+182 | 		if endpoint.Host != c.baseURL.Host {
+183 | 			fmt.Printf("Endpoint origin does not match connection origin\n")
+184 | 			return
+185 | 		}
+186 | 		c.endpoint = endpoint
+187 | 		close(c.endpointChan)
+188 | 
+189 | 	case "message":
+190 | 		var baseMessage JSONRPCResponse
+191 | 		if err := json.Unmarshal([]byte(data), &baseMessage); err != nil {
+192 | 			fmt.Printf("Error unmarshaling message: %v\n", err)
+193 | 			return
+194 | 		}
+195 | 
+196 | 		// Handle notification
+197 | 		if baseMessage.ID == nil {
+198 | 			var notification mcp.JSONRPCNotification
+199 | 			if err := json.Unmarshal([]byte(data), &notification); err != nil {
+200 | 				return
+201 | 			}
+202 | 			c.notifyMu.RLock()
+203 | 			if c.onNotification != nil {
+204 | 				c.onNotification(notification)
+205 | 			}
+206 | 			c.notifyMu.RUnlock()
+207 | 			return
+208 | 		}
+209 | 
+210 | 		c.mu.RLock()
+211 | 		ch, ok := c.responses[*baseMessage.ID]
+212 | 		c.mu.RUnlock()
+213 | 
+214 | 		if ok {
+215 | 			ch <- &baseMessage
+216 | 			c.mu.Lock()
+217 | 			delete(c.responses, *baseMessage.ID)
+218 | 			c.mu.Unlock()
+219 | 		}
+220 | 	}
+221 | }
+222 | 
+223 | func (c *SSE) SetNotificationHandler(handler func(notification mcp.JSONRPCNotification)) {
+224 | 	c.notifyMu.Lock()
+225 | 	defer c.notifyMu.Unlock()
+226 | 	c.onNotification = handler
+227 | }
+228 | 
+229 | // sendRequest sends a JSON-RPC request to the server and waits for a response.
+230 | // Returns the raw JSON response message or an error if the request fails.
+231 | func (c *SSE) SendRequest(
+232 | 	ctx context.Context,
+233 | 	request JSONRPCRequest,
+234 | ) (*JSONRPCResponse, error) {
+235 | 
+236 | 	if !c.started.Load() {
+237 | 		return nil, fmt.Errorf("transport not started yet")
+238 | 	}
+239 | 	if c.closed.Load() {
+240 | 		return nil, fmt.Errorf("transport has been closed")
+241 | 	}
+242 | 	if c.endpoint == nil {
+243 | 		return nil, fmt.Errorf("endpoint not received")
+244 | 	}
+245 | 
+246 | 	requestBytes, err := json.Marshal(request)
+247 | 	if err != nil {
+248 | 		return nil, fmt.Errorf("failed to marshal request: %w", err)
+249 | 	}
+250 | 
+251 | 	responseChan := make(chan *JSONRPCResponse, 1)
+252 | 	c.mu.Lock()
+253 | 	c.responses[request.ID] = responseChan
+254 | 	c.mu.Unlock()
+255 | 
+256 | 	req, err := http.NewRequestWithContext(
+257 | 		ctx,
+258 | 		"POST",
+259 | 		c.endpoint.String(),
+260 | 		bytes.NewReader(requestBytes),
+261 | 	)
+262 | 	if err != nil {
+263 | 		return nil, fmt.Errorf("failed to create request: %w", err)
+264 | 	}
+265 | 
+266 | 	req.Header.Set("Content-Type", "application/json")
+267 | 	// set custom http headers
+268 | 	for k, v := range c.headers {
+269 | 		req.Header.Set(k, v)
+270 | 	}
+271 | 
+272 | 	resp, err := c.httpClient.Do(req)
+273 | 	if err != nil {
+274 | 		return nil, fmt.Errorf("failed to send request: %w", err)
+275 | 	}
+276 | 	defer resp.Body.Close()
+277 | 
+278 | 	if resp.StatusCode != http.StatusOK &&
+279 | 		resp.StatusCode != http.StatusAccepted {
+280 | 		body, _ := io.ReadAll(resp.Body)
+281 | 		return nil, fmt.Errorf(
+282 | 			"request failed with status %d: %s",
+283 | 			resp.StatusCode,
+284 | 			body,
+285 | 		)
+286 | 	}
+287 | 
+288 | 	select {
+289 | 	case <-ctx.Done():
+290 | 		c.mu.Lock()
+291 | 		delete(c.responses, request.ID)
+292 | 		c.mu.Unlock()
+293 | 		return nil, ctx.Err()
+294 | 	case response := <-responseChan:
+295 | 		return response, nil
+296 | 	}
+297 | }
+298 | 
+299 | // Close shuts down the SSE client connection and cleans up any pending responses.
+300 | // Returns an error if the shutdown process fails.
+301 | func (c *SSE) Close() error {
+302 | 	if !c.closed.CompareAndSwap(false, true) {
+303 | 		return nil // Already closed
+304 | 	}
+305 | 
+306 | 	if c.cancelSSEStream != nil {
+307 | 		// It could stop the sse stream body, to quit the readSSE loop immediately
+308 | 		// Also, it could quit start() immediately if not receiving the endpoint
+309 | 		c.cancelSSEStream()
+310 | 	}
+311 | 
+312 | 	// Clean up any pending responses
+313 | 	c.mu.Lock()
+314 | 	for _, ch := range c.responses {
+315 | 		close(ch)
+316 | 	}
+317 | 	c.responses = make(map[int64]chan *JSONRPCResponse)
+318 | 	c.mu.Unlock()
+319 | 
+320 | 	return nil
+321 | }
+322 | 
+323 | // SendNotification sends a JSON-RPC notification to the server without expecting a response.
+324 | func (c *SSE) SendNotification(ctx context.Context, notification mcp.JSONRPCNotification) error {
+325 | 	if c.endpoint == nil {
+326 | 		return fmt.Errorf("endpoint not received")
+327 | 	}
+328 | 
+329 | 	notificationBytes, err := json.Marshal(notification)
+330 | 	if err != nil {
+331 | 		return fmt.Errorf("failed to marshal notification: %w", err)
+332 | 	}
+333 | 
+334 | 	req, err := http.NewRequestWithContext(
+335 | 		ctx,
+336 | 		"POST",
+337 | 		c.endpoint.String(),
+338 | 		bytes.NewReader(notificationBytes),
+339 | 	)
+340 | 	if err != nil {
+341 | 		return fmt.Errorf("failed to create notification request: %w", err)
+342 | 	}
+343 | 
+344 | 	req.Header.Set("Content-Type", "application/json")
+345 | 	// Set custom HTTP headers
+346 | 	for k, v := range c.headers {
+347 | 		req.Header.Set(k, v)
+348 | 	}
+349 | 
+350 | 	resp, err := c.httpClient.Do(req)
+351 | 	if err != nil {
+352 | 		return fmt.Errorf("failed to send notification: %w", err)
+353 | 	}
+354 | 	defer resp.Body.Close()
+355 | 
+356 | 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+357 | 		body, _ := io.ReadAll(resp.Body)
+358 | 		return fmt.Errorf(
+359 | 			"notification failed with status %d: %s",
+360 | 			resp.StatusCode,
+361 | 			body,
+362 | 		)
+363 | 	}
+364 | 
+365 | 	return nil
+366 | }
+367 | 
+368 | // GetEndpoint returns the current endpoint URL for the SSE connection.
+369 | func (c *SSE) GetEndpoint() *url.URL {
+370 | 	return c.endpoint
+371 | }
+372 | 
+373 | // GetBaseURL returns the base URL set in the SSE constructor.
+374 | func (c *SSE) GetBaseURL() *url.URL {
+375 | 	return c.baseURL
+376 | }
+377 | 
+
+
+--------------------------------------------------------------------------------
+/client/transport/sse_test.go:
+--------------------------------------------------------------------------------
+  1 | package transport
+  2 | 
+  3 | import (
+  4 | 	"context"
+  5 | 	"encoding/json"
+  6 | 	"errors"
+  7 | 	"sync"
+  8 | 	"testing"
+  9 | 	"time"
+ 10 | 
+ 11 | 	"fmt"
+ 12 | 	"net/http"
+ 13 | 	"net/http/httptest"
+ 14 | 
+ 15 | 	"github.com/mark3labs/mcp-go/mcp"
+ 16 | )
+ 17 | 
+ 18 | // startMockSSEEchoServer starts a test HTTP server that implements
+ 19 | // a minimal SSE-based echo server for testing purposes.
+ 20 | // It returns the server URL and a function to close the server.
+ 21 | func startMockSSEEchoServer() (string, func()) {
+ 22 | 	// Create handler for SSE endpoint
+ 23 | 	var sseWriter http.ResponseWriter
+ 24 | 	var flush func()
+ 25 | 	var mu sync.Mutex
+ 26 | 	sseHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 27 | 		// Setup SSE headers
+ 28 | 		defer func() {
+ 29 | 			mu.Lock() // for passing race test
+ 30 | 			sseWriter = nil
+ 31 | 			flush = nil
+ 32 | 			mu.Unlock()
+ 33 | 			fmt.Printf("SSEHandler ends: %v\n", r.Context().Err())
+ 34 | 		}()
+ 35 | 
+ 36 | 		w.Header().Set("Content-Type", "text/event-stream")
+ 37 | 		flusher, ok := w.(http.Flusher)
+ 38 | 		if !ok {
+ 39 | 			http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+ 40 | 			return
+ 41 | 		}
+ 42 | 
+ 43 | 		mu.Lock()
+ 44 | 		sseWriter = w
+ 45 | 		flush = flusher.Flush
+ 46 | 		mu.Unlock()
+ 47 | 
+ 48 | 		// Send initial endpoint event with message endpoint URL
+ 49 | 		mu.Lock()
+ 50 | 		fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", "/message")
+ 51 | 		flusher.Flush()
+ 52 | 		mu.Unlock()
+ 53 | 
+ 54 | 		// Keep connection open
+ 55 | 		<-r.Context().Done()
+ 56 | 	})
+ 57 | 
+ 58 | 	// Create handler for message endpoint
+ 59 | 	messageHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 60 | 		// Handle only POST requests
+ 61 | 		if r.Method != http.MethodPost {
+ 62 | 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+ 63 | 			return
+ 64 | 		}
+ 65 | 
+ 66 | 		// Parse incoming JSON-RPC request
+ 67 | 		var request map[string]interface{}
+ 68 | 		decoder := json.NewDecoder(r.Body)
+ 69 | 		if err := decoder.Decode(&request); err != nil {
+ 70 | 			http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+ 71 | 			return
+ 72 | 		}
+ 73 | 
+ 74 | 		// Echo back the request as the response result
+ 75 | 		response := map[string]interface{}{
+ 76 | 			"jsonrpc": "2.0",
+ 77 | 			"id":      request["id"],
+ 78 | 			"result":  request,
+ 79 | 		}
+ 80 | 
+ 81 | 		method := request["method"]
+ 82 | 		switch method {
+ 83 | 		case "debug/echo":
+ 84 | 			response["result"] = request
+ 85 | 		case "debug/echo_notification":
+ 86 | 			response["result"] = request
+ 87 | 			// send notification to client
+ 88 | 			responseBytes, _ := json.Marshal(map[string]any{
+ 89 | 				"jsonrpc": "2.0",
+ 90 | 				"method":  "debug/test",
+ 91 | 				"params":  request,
+ 92 | 			})
+ 93 | 			mu.Lock()
+ 94 | 			fmt.Fprintf(sseWriter, "event: message\ndata: %s\n\n", responseBytes)
+ 95 | 			flush()
+ 96 | 			mu.Unlock()
+ 97 | 		case "debug/echo_error_string":
+ 98 | 			data, _ := json.Marshal(request)
+ 99 | 			response["error"] = map[string]interface{}{
+100 | 				"code":    -1,
+101 | 				"message": string(data),
+102 | 			}
+103 | 		}
+104 | 
+105 | 		// Set response headers
+106 | 		w.Header().Set("Content-Type", "application/json")
+107 | 		w.WriteHeader(http.StatusAccepted)
+108 | 
+109 | 		go func() {
+110 | 			data, _ := json.Marshal(response)
+111 | 			mu.Lock()
+112 | 			defer mu.Unlock()
+113 | 			if sseWriter != nil && flush != nil {
+114 | 				fmt.Fprintf(sseWriter, "event: message\ndata: %s\n\n", data)
+115 | 				flush()
+116 | 			}
+117 | 		}()
+118 | 
+119 | 	})
+120 | 
+121 | 	// Create a router to handle different endpoints
+122 | 	mux := http.NewServeMux()
+123 | 	mux.Handle("/", sseHandler)
+124 | 	mux.Handle("/message", messageHandler)
+125 | 
+126 | 	// Start test server
+127 | 	testServer := httptest.NewServer(mux)
+128 | 
+129 | 	return testServer.URL, testServer.Close
+130 | }
+131 | 
+132 | func TestSSE(t *testing.T) {
+133 | 	// Compile mock server
+134 | 	url, closeF := startMockSSEEchoServer()
+135 | 	defer closeF()
+136 | 
+137 | 	trans, err := NewSSE(url)
+138 | 	if err != nil {
+139 | 		t.Fatal(err)
+140 | 	}
+141 | 
+142 | 	// Start the transport
+143 | 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+144 | 	defer cancel()
+145 | 
+146 | 	err = trans.Start(ctx)
+147 | 	if err != nil {
+148 | 		t.Fatalf("Failed to start transport: %v", err)
+149 | 	}
+150 | 	defer trans.Close()
+151 | 
+152 | 	t.Run("SendRequest", func(t *testing.T) {
+153 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+154 | 		defer cancel()
+155 | 
+156 | 		params := map[string]interface{}{
+157 | 			"string": "hello world",
+158 | 			"array":  []interface{}{1, 2, 3},
+159 | 		}
+160 | 
+161 | 		request := JSONRPCRequest{
+162 | 			JSONRPC: "2.0",
+163 | 			ID:      1,
+164 | 			Method:  "debug/echo",
+165 | 			Params:  params,
+166 | 		}
+167 | 
+168 | 		// Send the request
+169 | 		response, err := trans.SendRequest(ctx, request)
+170 | 		if err != nil {
+171 | 			t.Fatalf("SendRequest failed: %v", err)
+172 | 		}
+173 | 
+174 | 		// Parse the result to verify echo
+175 | 		var result struct {
+176 | 			JSONRPC string                 `json:"jsonrpc"`
+177 | 			ID      int64                  `json:"id"`
+178 | 			Method  string                 `json:"method"`
+179 | 			Params  map[string]interface{} `json:"params"`
+180 | 		}
+181 | 
+182 | 		if err := json.Unmarshal(response.Result, &result); err != nil {
+183 | 			t.Fatalf("Failed to unmarshal result: %v", err)
+184 | 		}
+185 | 
+186 | 		// Verify response data matches what was sent
+187 | 		if result.JSONRPC != "2.0" {
+188 | 			t.Errorf("Expected JSONRPC value '2.0', got '%s'", result.JSONRPC)
+189 | 		}
+190 | 		if result.ID != 1 {
+191 | 			t.Errorf("Expected ID 1, got %d", result.ID)
+192 | 		}
+193 | 		if result.Method != "debug/echo" {
+194 | 			t.Errorf("Expected method 'debug/echo', got '%s'", result.Method)
+195 | 		}
+196 | 
+197 | 		if str, ok := result.Params["string"].(string); !ok || str != "hello world" {
+198 | 			t.Errorf("Expected string 'hello world', got %v", result.Params["string"])
+199 | 		}
+200 | 
+201 | 		if arr, ok := result.Params["array"].([]interface{}); !ok || len(arr) != 3 {
+202 | 			t.Errorf("Expected array with 3 items, got %v", result.Params["array"])
+203 | 		}
+204 | 	})
+205 | 
+206 | 	t.Run("SendRequestWithTimeout", func(t *testing.T) {
+207 | 		// Create a context that's already canceled
+208 | 		ctx, cancel := context.WithCancel(context.Background())
+209 | 		cancel() // Cancel the context immediately
+210 | 
+211 | 		// Prepare a request
+212 | 		request := JSONRPCRequest{
+213 | 			JSONRPC: "2.0",
+214 | 			ID:      3,
+215 | 			Method:  "debug/echo",
+216 | 		}
+217 | 
+218 | 		// The request should fail because the context is canceled
+219 | 		_, err := trans.SendRequest(ctx, request)
+220 | 		if err == nil {
+221 | 			t.Errorf("Expected context canceled error, got nil")
+222 | 		} else if !errors.Is(err, context.Canceled) {
+223 | 			t.Errorf("Expected context.Canceled error, got: %v", err)
+224 | 		}
+225 | 	})
+226 | 
+227 | 	t.Run("SendNotification & NotificationHandler", func(t *testing.T) {
+228 | 
+229 | 		var wg sync.WaitGroup
+230 | 		notificationChan := make(chan mcp.JSONRPCNotification, 1)
+231 | 
+232 | 		// Set notification handler
+233 | 		trans.SetNotificationHandler(func(notification mcp.JSONRPCNotification) {
+234 | 			notificationChan <- notification
+235 | 		})
+236 | 
+237 | 		// Send a notification
+238 | 		// This would trigger a notification from the server
+239 | 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+240 | 		defer cancel()
+241 | 
+242 | 		notification := mcp.JSONRPCNotification{
+243 | 			JSONRPC: "2.0",
+244 | 			Notification: mcp.Notification{
+245 | 				Method: "debug/echo_notification",
+246 | 				Params: mcp.NotificationParams{
+247 | 					AdditionalFields: map[string]interface{}{"test": "value"},
+248 | 				},
+249 | 			},
+250 | 		}
+251 | 		err := trans.SendNotification(ctx, notification)
+252 | 		if err != nil {
+253 | 			t.Fatalf("SendNotification failed: %v", err)
+254 | 		}
+255 | 
+256 | 		wg.Add(1)
+257 | 		go func() {
+258 | 			defer wg.Done()
+259 | 			select {
+260 | 			case nt := <-notificationChan:
+261 | 				// We received a notification
+262 | 				responseJson, _ := json.Marshal(nt.Params.AdditionalFields)
+263 | 				requestJson, _ := json.Marshal(notification)
+264 | 				if string(responseJson) != string(requestJson) {
+265 | 					t.Errorf("Notification handler did not send the expected notification: \ngot %s\nexpect %s", responseJson, requestJson)
+266 | 				}
+267 | 
+268 | 			case <-time.After(1 * time.Second):
+269 | 				t.Errorf("Expected notification, got none")
+270 | 			}
+271 | 		}()
+272 | 
+273 | 		wg.Wait()
+274 | 	})
+275 | 
+276 | 	t.Run("MultipleRequests", func(t *testing.T) {
+277 | 		var wg sync.WaitGroup
+278 | 		const numRequests = 5
+279 | 
+280 | 		// Send multiple requests concurrently
+281 | 		mu := sync.Mutex{}
+282 | 		responses := make([]*JSONRPCResponse, numRequests)
+283 | 		errors := make([]error, numRequests)
+284 | 
+285 | 		for i := 0; i < numRequests; i++ {
+286 | 			wg.Add(1)
+287 | 			go func(idx int) {
+288 | 				defer wg.Done()
+289 | 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+290 | 				defer cancel()
+291 | 
+292 | 				// Each request has a unique ID and payload
+293 | 				request := JSONRPCRequest{
+294 | 					JSONRPC: "2.0",
+295 | 					ID:      int64(100 + idx),
+296 | 					Method:  "debug/echo",
+297 | 					Params: map[string]interface{}{
+298 | 						"requestIndex": idx,
+299 | 						"timestamp":    time.Now().UnixNano(),
+300 | 					},
+301 | 				}
+302 | 
+303 | 				resp, err := trans.SendRequest(ctx, request)
+304 | 				mu.Lock()
+305 | 				responses[idx] = resp
+306 | 				errors[idx] = err
+307 | 				mu.Unlock()
+308 | 			}(i)
+309 | 		}
+310 | 
+311 | 		wg.Wait()
+312 | 
+313 | 		// Check results
+314 | 		for i := 0; i < numRequests; i++ {
+315 | 			if errors[i] != nil {
+316 | 				t.Errorf("Request %d failed: %v", i, errors[i])
+317 | 				continue
+318 | 			}
+319 | 
+320 | 			if responses[i] == nil || responses[i].ID == nil || *responses[i].ID != int64(100+i) {
+321 | 				t.Errorf("Request %d: Expected ID %d, got %v", i, 100+i, responses[i])
+322 | 				continue
+323 | 			}
+324 | 
+325 | 			// Parse the result to verify echo
+326 | 			var result struct {
+327 | 				JSONRPC string                 `json:"jsonrpc"`
+328 | 				ID      int64                  `json:"id"`
+329 | 				Method  string                 `json:"method"`
+330 | 				Params  map[string]interface{} `json:"params"`
+331 | 			}
+332 | 
+333 | 			if err := json.Unmarshal(responses[i].Result, &result); err != nil {
+334 | 				t.Errorf("Request %d: Failed to unmarshal result: %v", i, err)
+335 | 				continue
+336 | 			}
+337 | 
+338 | 			// Verify data matches what was sent
+339 | 			if result.ID != int64(100+i) {
+340 | 				t.Errorf("Request %d: Expected echoed ID %d, got %d", i, 100+i, result.ID)
+341 | 			}
+342 | 
+343 | 			if result.Method != "debug/echo" {
+344 | 				t.Errorf("Request %d: Expected method 'debug/echo', got '%s'", i, result.Method)
+345 | 			}
+346 | 
+347 | 			// Verify the requestIndex parameter
+348 | 			if idx, ok := result.Params["requestIndex"].(float64); !ok || int(idx) != i {
+349 | 				t.Errorf("Request %d: Expected requestIndex %d, got %v", i, i, result.Params["requestIndex"])
+350 | 			}
+351 | 		}
+352 | 	})
+353 | 
+354 | 	t.Run("ResponseError", func(t *testing.T) {
+355 | 
+356 | 		// Prepare a request
+357 | 		request := JSONRPCRequest{
+358 | 			JSONRPC: "2.0",
+359 | 			ID:      100,
+360 | 			Method:  "debug/echo_error_string",
+361 | 		}
+362 | 
+363 | 		// The request should fail because the context is canceled
+364 | 		reps, err := trans.SendRequest(ctx, request)
+365 | 		if err != nil {
+366 | 			t.Errorf("SendRequest failed: %v", err)
+367 | 		}
+368 | 
+369 | 		if reps.Error == nil {
+370 | 			t.Errorf("Expected error, got nil")
+371 | 		}
+372 | 
+373 | 		var responseError JSONRPCRequest
+374 | 		if err := json.Unmarshal([]byte(reps.Error.Message), &responseError); err != nil {
+375 | 			t.Errorf("Failed to unmarshal result: %v", err)
+376 | 		}
+377 | 
+378 | 		if responseError.Method != "debug/echo_error_string" {
+379 | 			t.Errorf("Expected method 'debug/echo_error_string', got '%s'", responseError.Method)
+380 | 		}
+381 | 		if responseError.ID != 100 {
+382 | 			t.Errorf("Expected ID 100, got %d", responseError.ID)
+383 | 		}
+384 | 		if responseError.JSONRPC != "2.0" {
+385 | 			t.Errorf("Expected JSONRPC '2.0', got '%s'", responseError.JSONRPC)
+386 | 		}
+387 | 	})
+388 | 
+389 | }
+390 | 
+391 | func TestSSEErrors(t *testing.T) {
+392 | 	t.Run("InvalidURL", func(t *testing.T) {
+393 | 		// Create a new SSE transport with an invalid URL
+394 | 		_, err := NewSSE("://invalid-url")
+395 | 		if err == nil {
+396 | 			t.Errorf("Expected error when creating with invalid URL, got nil")
+397 | 		}
+398 | 	})
+399 | 
+400 | 	t.Run("NonExistentURL", func(t *testing.T) {
+401 | 		// Create a new SSE transport with a non-existent URL
+402 | 		sse, err := NewSSE("http://localhost:1")
+403 | 		if err != nil {
+404 | 			t.Fatalf("Failed to create SSE transport: %v", err)
+405 | 		}
+406 | 
+407 | 		// Start should fail
+408 | 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+409 | 		defer cancel()
+410 | 
+411 | 		err = sse.Start(ctx)
+412 | 		if err == nil {
+413 | 			t.Errorf("Expected error when starting with non-existent URL, got nil")
+414 | 			sse.Close()
+415 | 		}
+416 | 	})
+417 | 
+418 | 	t.Run("RequestBeforeStart", func(t *testing.T) {
+419 | 		url, closeF := startMockSSEEchoServer()
+420 | 		defer closeF()
+421 | 
+422 | 		// Create a new SSE instance without calling Start method
+423 | 		sse, err := NewSSE(url)
+424 | 		if err != nil {
+425 | 			t.Fatalf("Failed to create SSE transport: %v", err)
+426 | 		}
+427 | 
+428 | 		// Prepare a request
+429 | 		request := JSONRPCRequest{
+430 | 			JSONRPC: "2.0",
+431 | 			ID:      99,
+432 | 			Method:  "ping",
+433 | 		}
+434 | 
+435 | 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+436 | 		defer cancel()
+437 | 
+438 | 		_, err = sse.SendRequest(ctx, request)
+439 | 		if err == nil {
+440 | 			t.Errorf("Expected SendRequest to fail before Start(), but it didn't")
+441 | 		}
+442 | 	})
+443 | 
+444 | 	t.Run("RequestAfterClose", func(t *testing.T) {
+445 | 		// Start a mock server
+446 | 		url, closeF := startMockSSEEchoServer()
+447 | 		defer closeF()
+448 | 
+449 | 		// Create a new SSE transport
+450 | 		sse, err := NewSSE(url)
+451 | 		if err != nil {
+452 | 			t.Fatalf("Failed to create SSE transport: %v", err)
+453 | 		}
+454 | 
+455 | 		// Start the transport
+456 | 		ctx := context.Background()
+457 | 		if err := sse.Start(ctx); err != nil {
+458 | 			t.Fatalf("Failed to start SSE transport: %v", err)
+459 | 		}
+460 | 
+461 | 		// Close the transport
+462 | 		sse.Close()
+463 | 
+464 | 		// Wait a bit to ensure connection has closed
+465 | 		time.Sleep(100 * time.Millisecond)
+466 | 
+467 | 		// Try to send a request after close
+468 | 		request := JSONRPCRequest{
+469 | 			JSONRPC: "2.0",
+470 | 			ID:      1,
+471 | 			Method:  "ping",
+472 | 		}
+473 | 
+474 | 		_, err = sse.SendRequest(ctx, request)
+475 | 		if err == nil {
+476 | 			t.Errorf("Expected error when sending request after close, got nil")
+477 | 		}
+478 | 	})
+479 | 
+480 | }
+481 | 
+
+
+--------------------------------------------------------------------------------
+/client/transport/stdio.go:
+--------------------------------------------------------------------------------
+  1 | package transport
+  2 | 
+  3 | import (
+  4 | 	"bufio"
+  5 | 	"context"
+  6 | 	"encoding/json"
+  7 | 	"fmt"
+  8 | 	"io"
+  9 | 	"os"
+ 10 | 	"os/exec"
+ 11 | 	"sync"
+ 12 | 
+ 13 | 	"github.com/mark3labs/mcp-go/mcp"
+ 14 | )
+ 15 | 
+ 16 | // Stdio implements the transport layer of the MCP protocol using stdio communication.
+ 17 | // It launches a subprocess and communicates with it via standard input/output streams
+ 18 | // using JSON-RPC messages. The client handles message routing between requests and
+ 19 | // responses, and supports asynchronous notifications.
+ 20 | type Stdio struct {
+ 21 | 	command string
+ 22 | 	args    []string
+ 23 | 	env     []string
+ 24 | 
+ 25 | 	cmd            *exec.Cmd
+ 26 | 	stdin          io.WriteCloser
+ 27 | 	stdout         *bufio.Reader
+ 28 | 	stderr         io.ReadCloser
+ 29 | 	responses      map[int64]chan *JSONRPCResponse
+ 30 | 	mu             sync.RWMutex
+ 31 | 	done           chan struct{}
+ 32 | 	onNotification func(mcp.JSONRPCNotification)
+ 33 | 	notifyMu       sync.RWMutex
+ 34 | }
+ 35 | 
+ 36 | // NewStdio creates a new stdio transport to communicate with a subprocess.
+ 37 | // It launches the specified command with given arguments and sets up stdin/stdout pipes for communication.
+ 38 | // Returns an error if the subprocess cannot be started or the pipes cannot be created.
+ 39 | func NewStdio(
+ 40 | 	command string,
+ 41 | 	env []string,
+ 42 | 	args ...string,
+ 43 | ) *Stdio {
+ 44 | 
+ 45 | 	client := &Stdio{
+ 46 | 		command: command,
+ 47 | 		args:    args,
+ 48 | 		env:     env,
+ 49 | 
+ 50 | 		responses: make(map[int64]chan *JSONRPCResponse),
+ 51 | 		done:      make(chan struct{}),
+ 52 | 	}
+ 53 | 
+ 54 | 	return client
+ 55 | }
+ 56 | 
+ 57 | func (c *Stdio) Start(ctx context.Context) error {
+ 58 | 	cmd := exec.CommandContext(ctx, c.command, c.args...)
+ 59 | 
+ 60 | 	mergedEnv := os.Environ()
+ 61 | 	mergedEnv = append(mergedEnv, c.env...)
+ 62 | 
+ 63 | 	cmd.Env = mergedEnv
+ 64 | 
+ 65 | 	stdin, err := cmd.StdinPipe()
+ 66 | 	if err != nil {
+ 67 | 		return fmt.Errorf("failed to create stdin pipe: %w", err)
+ 68 | 	}
+ 69 | 
+ 70 | 	stdout, err := cmd.StdoutPipe()
+ 71 | 	if err != nil {
+ 72 | 		return fmt.Errorf("failed to create stdout pipe: %w", err)
+ 73 | 	}
+ 74 | 
+ 75 | 	stderr, err := cmd.StderrPipe()
+ 76 | 	if err != nil {
+ 77 | 		return fmt.Errorf("failed to create stderr pipe: %w", err)
+ 78 | 	}
+ 79 | 
+ 80 | 	c.cmd = cmd
+ 81 | 	c.stdin = stdin
+ 82 | 	c.stderr = stderr
+ 83 | 	c.stdout = bufio.NewReader(stdout)
+ 84 | 
+ 85 | 	if err := cmd.Start(); err != nil {
+ 86 | 		return fmt.Errorf("failed to start command: %w", err)
+ 87 | 	}
+ 88 | 
+ 89 | 	// Start reading responses in a goroutine and wait for it to be ready
+ 90 | 	ready := make(chan struct{})
+ 91 | 	go func() {
+ 92 | 		close(ready)
+ 93 | 		c.readResponses()
+ 94 | 	}()
+ 95 | 	<-ready
+ 96 | 
+ 97 | 	return nil
+ 98 | }
+ 99 | 
+100 | // Close shuts down the stdio client, closing the stdin pipe and waiting for the subprocess to exit.
+101 | // Returns an error if there are issues closing stdin or waiting for the subprocess to terminate.
+102 | func (c *Stdio) Close() error {
+103 | 	close(c.done)
+104 | 	if err := c.stdin.Close(); err != nil {
+105 | 		return fmt.Errorf("failed to close stdin: %w", err)
+106 | 	}
+107 | 	if err := c.stderr.Close(); err != nil {
+108 | 		return fmt.Errorf("failed to close stderr: %w", err)
+109 | 	}
+110 | 	return c.cmd.Wait()
+111 | }
+112 | 
+113 | // OnNotification registers a handler function to be called when notifications are received.
+114 | // Multiple handlers can be registered and will be called in the order they were added.
+115 | func (c *Stdio) SetNotificationHandler(
+116 | 	handler func(notification mcp.JSONRPCNotification),
+117 | ) {
+118 | 	c.notifyMu.Lock()
+119 | 	defer c.notifyMu.Unlock()
+120 | 	c.onNotification = handler
+121 | }
+122 | 
+123 | // readResponses continuously reads and processes responses from the server's stdout.
+124 | // It handles both responses to requests and notifications, routing them appropriately.
+125 | // Runs until the done channel is closed or an error occurs reading from stdout.
+126 | func (c *Stdio) readResponses() {
+127 | 	for {
+128 | 		select {
+129 | 		case <-c.done:
+130 | 			return
+131 | 		default:
+132 | 			line, err := c.stdout.ReadString('\n')
+133 | 			if err != nil {
+134 | 				if err != io.EOF {
+135 | 					fmt.Printf("Error reading response: %v\n", err)
+136 | 				}
+137 | 				return
+138 | 			}
+139 | 
+140 | 			var baseMessage JSONRPCResponse
+141 | 			if err := json.Unmarshal([]byte(line), &baseMessage); err != nil {
+142 | 				continue
+143 | 			}
+144 | 
+145 | 			// Handle notification
+146 | 			if baseMessage.ID == nil {
+147 | 				var notification mcp.JSONRPCNotification
+148 | 				if err := json.Unmarshal([]byte(line), &notification); err != nil {
+149 | 					continue
+150 | 				}
+151 | 				c.notifyMu.RLock()
+152 | 				if c.onNotification != nil {
+153 | 					c.onNotification(notification)
+154 | 				}
+155 | 				c.notifyMu.RUnlock()
+156 | 				continue
+157 | 			}
+158 | 
+159 | 			c.mu.RLock()
+160 | 			ch, ok := c.responses[*baseMessage.ID]
+161 | 			c.mu.RUnlock()
+162 | 
+163 | 			if ok {
+164 | 				ch <- &baseMessage
+165 | 				c.mu.Lock()
+166 | 				delete(c.responses, *baseMessage.ID)
+167 | 				c.mu.Unlock()
+168 | 			}
+169 | 		}
+170 | 	}
+171 | }
+172 | 
+173 | // sendRequest sends a JSON-RPC request to the server and waits for a response.
+174 | // It creates a unique request ID, sends the request over stdin, and waits for
+175 | // the corresponding response or context cancellation.
+176 | // Returns the raw JSON response message or an error if the request fails.
+177 | func (c *Stdio) SendRequest(
+178 | 	ctx context.Context,
+179 | 	request JSONRPCRequest,
+180 | ) (*JSONRPCResponse, error) {
+181 | 	if c.stdin == nil {
+182 | 		return nil, fmt.Errorf("stdio client not started")
+183 | 	}
+184 | 
+185 | 	// Create the complete request structure
+186 | 	responseChan := make(chan *JSONRPCResponse, 1)
+187 | 	c.mu.Lock()
+188 | 	c.responses[request.ID] = responseChan
+189 | 	c.mu.Unlock()
+190 | 
+191 | 	requestBytes, err := json.Marshal(request)
+192 | 	if err != nil {
+193 | 		return nil, fmt.Errorf("failed to marshal request: %w", err)
+194 | 	}
+195 | 	requestBytes = append(requestBytes, '\n')
+196 | 
+197 | 	if _, err := c.stdin.Write(requestBytes); err != nil {
+198 | 		return nil, fmt.Errorf("failed to write request: %w", err)
+199 | 	}
+200 | 
+201 | 	select {
+202 | 	case <-ctx.Done():
+203 | 		c.mu.Lock()
+204 | 		delete(c.responses, request.ID)
+205 | 		c.mu.Unlock()
+206 | 		return nil, ctx.Err()
+207 | 	case response := <-responseChan:
+208 | 		return response, nil
+209 | 	}
+210 | }
+211 | 
+212 | // SendNotification sends a json RPC Notification to the server.
+213 | func (c *Stdio) SendNotification(
+214 | 	ctx context.Context,
+215 | 	notification mcp.JSONRPCNotification,
+216 | ) error {
+217 | 	if c.stdin == nil {
+218 | 		return fmt.Errorf("stdio client not started")
+219 | 	}
+220 | 	
+221 | 	notificationBytes, err := json.Marshal(notification)
+222 | 	if err != nil {
+223 | 		return fmt.Errorf("failed to marshal notification: %w", err)
+224 | 	}
+225 | 	notificationBytes = append(notificationBytes, '\n')
+226 | 
+227 | 	if _, err := c.stdin.Write(notificationBytes); err != nil {
+228 | 		return fmt.Errorf("failed to write notification: %w", err)
+229 | 	}
+230 | 
+231 | 	return nil
+232 | }
+233 | 
+234 | // Stderr returns a reader for the stderr output of the subprocess.
+235 | // This can be used to capture error messages or logs from the subprocess.
+236 | func (c *Stdio) Stderr() io.Reader {
+237 | 	return c.stderr
+238 | }
+239 | 
+
+
+--------------------------------------------------------------------------------
+/client/transport/stdio_test.go:
+--------------------------------------------------------------------------------
+  1 | package transport
+  2 | 
+  3 | import (
+  4 | 	"context"
+  5 | 	"encoding/json"
+  6 | 	"fmt"
+  7 | 	"os"
+  8 | 	"os/exec"
+  9 | 	"path/filepath"
+ 10 | 	"runtime"
+ 11 | 	"sync"
+ 12 | 	"testing"
+ 13 | 	"time"
+ 14 | 
+ 15 | 	"github.com/mark3labs/mcp-go/mcp"
+ 16 | )
+ 17 | 
+ 18 | func compileTestServer(outputPath string) error {
+ 19 | 	cmd := exec.Command(
+ 20 | 		"go",
+ 21 | 		"build",
+ 22 | 		"-o",
+ 23 | 		outputPath,
+ 24 | 		"../../testdata/mockstdio_server.go",
+ 25 | 	)
+ 26 | 	if output, err := cmd.CombinedOutput(); err != nil {
+ 27 | 		return fmt.Errorf("compilation failed: %v\nOutput: %s", err, output)
+ 28 | 	}
+ 29 | 	return nil
+ 30 | }
+ 31 | 
+ 32 | func TestStdio(t *testing.T) {
+ 33 | 	// Compile mock server
+ 34 | 	mockServerPath := filepath.Join(os.TempDir(), "mockstdio_server")
+ 35 | 	// Add .exe suffix on Windows
+ 36 | 	if runtime.GOOS == "windows" {
+ 37 | 		mockServerPath += ".exe"
+ 38 | 	}
+ 39 | 	if err := compileTestServer(mockServerPath); err != nil {
+ 40 | 		t.Fatalf("Failed to compile mock server: %v", err)
+ 41 | 	}
+ 42 | 	defer os.Remove(mockServerPath)
+ 43 | 
+ 44 | 	// Create a new Stdio transport
+ 45 | 	stdio := NewStdio(mockServerPath, nil)
+ 46 | 
+ 47 | 	// Start the transport
+ 48 | 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+ 49 | 	defer cancel()
+ 50 | 
+ 51 | 	err := stdio.Start(ctx)
+ 52 | 	if err != nil {
+ 53 | 		t.Fatalf("Failed to start Stdio transport: %v", err)
+ 54 | 	}
+ 55 | 	defer stdio.Close()
+ 56 | 
+ 57 | 	t.Run("SendRequest", func(t *testing.T) {
+ 58 | 		ctx, cancel := context.WithTimeout(context.Background(), 5000000000*time.Second)
+ 59 | 		defer cancel()
+ 60 | 
+ 61 | 		params := map[string]interface{}{
+ 62 | 			"string": "hello world",
+ 63 | 			"array":  []interface{}{1, 2, 3},
+ 64 | 		}
+ 65 | 
+ 66 | 		request := JSONRPCRequest{
+ 67 | 			JSONRPC: "2.0",
+ 68 | 			ID:      1,
+ 69 | 			Method:  "debug/echo",
+ 70 | 			Params:  params,
+ 71 | 		}
+ 72 | 
+ 73 | 		// Send the request
+ 74 | 		response, err := stdio.SendRequest(ctx, request)
+ 75 | 		if err != nil {
+ 76 | 			t.Fatalf("SendRequest failed: %v", err)
+ 77 | 		}
+ 78 | 
+ 79 | 		// Parse the result to verify echo
+ 80 | 		var result struct {
+ 81 | 			JSONRPC string                 `json:"jsonrpc"`
+ 82 | 			ID      int64                  `json:"id"`
+ 83 | 			Method  string                 `json:"method"`
+ 84 | 			Params  map[string]interface{} `json:"params"`
+ 85 | 		}
+ 86 | 
+ 87 | 		if err := json.Unmarshal(response.Result, &result); err != nil {
+ 88 | 			t.Fatalf("Failed to unmarshal result: %v", err)
+ 89 | 		}
+ 90 | 
+ 91 | 		// Verify response data matches what was sent
+ 92 | 		if result.JSONRPC != "2.0" {
+ 93 | 			t.Errorf("Expected JSONRPC value '2.0', got '%s'", result.JSONRPC)
+ 94 | 		}
+ 95 | 		if result.ID != 1 {
+ 96 | 			t.Errorf("Expected ID 1, got %d", result.ID)
+ 97 | 		}
+ 98 | 		if result.Method != "debug/echo" {
+ 99 | 			t.Errorf("Expected method 'debug/echo', got '%s'", result.Method)
+100 | 		}
+101 | 
+102 | 		if str, ok := result.Params["string"].(string); !ok || str != "hello world" {
+103 | 			t.Errorf("Expected string 'hello world', got %v", result.Params["string"])
+104 | 		}
+105 | 
+106 | 		if arr, ok := result.Params["array"].([]interface{}); !ok || len(arr) != 3 {
+107 | 			t.Errorf("Expected array with 3 items, got %v", result.Params["array"])
+108 | 		}
+109 | 	})
+110 | 
+111 | 	t.Run("SendRequestWithTimeout", func(t *testing.T) {
+112 | 		// Create a context that's already canceled
+113 | 		ctx, cancel := context.WithCancel(context.Background())
+114 | 		cancel() // Cancel the context immediately
+115 | 
+116 | 		// Prepare a request
+117 | 		request := JSONRPCRequest{
+118 | 			JSONRPC: "2.0",
+119 | 			ID:      3,
+120 | 			Method:  "debug/echo",
+121 | 		}
+122 | 
+123 | 		// The request should fail because the context is canceled
+124 | 		_, err := stdio.SendRequest(ctx, request)
+125 | 		if err == nil {
+126 | 			t.Errorf("Expected context canceled error, got nil")
+127 | 		} else if err != context.Canceled {
+128 | 			t.Errorf("Expected context.Canceled error, got: %v", err)
+129 | 		}
+130 | 	})
+131 | 
+132 | 	t.Run("SendNotification & NotificationHandler", func(t *testing.T) {
+133 | 
+134 | 		var wg sync.WaitGroup
+135 | 		notificationChan := make(chan mcp.JSONRPCNotification, 1)
+136 | 
+137 | 		// Set notification handler
+138 | 		stdio.SetNotificationHandler(func(notification mcp.JSONRPCNotification) {
+139 | 			notificationChan <- notification
+140 | 		})
+141 | 
+142 | 		// Send a notification
+143 | 		// This would trigger a notification from the server
+144 | 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+145 | 		defer cancel()
+146 | 
+147 | 		notification := mcp.JSONRPCNotification{
+148 | 			JSONRPC: "2.0",
+149 | 			Notification: mcp.Notification{
+150 | 				Method: "debug/echo_notification",
+151 | 				Params: mcp.NotificationParams{
+152 | 					AdditionalFields: map[string]interface{}{"test": "value"},
+153 | 				},
+154 | 			},
+155 | 		}
+156 | 		err := stdio.SendNotification(ctx, notification)
+157 | 		if err != nil {
+158 | 			t.Fatalf("SendNotification failed: %v", err)
+159 | 		}
+160 | 
+161 | 		wg.Add(1)
+162 | 		go func() {
+163 | 			defer wg.Done()
+164 | 			select {
+165 | 			case nt := <-notificationChan:
+166 | 				// We received a notification
+167 | 				responseJson, _ := json.Marshal(nt.Params.AdditionalFields)
+168 | 				requestJson, _ := json.Marshal(notification)
+169 | 				if string(responseJson) != string(requestJson) {
+170 | 					t.Errorf("Notification handler did not send the expected notification: \ngot %s\nexpect %s", responseJson, requestJson)
+171 | 				}
+172 | 
+173 | 			case <-time.After(1 * time.Second):
+174 | 				t.Errorf("Expected notification, got none")
+175 | 			}
+176 | 		}()
+177 | 
+178 | 		wg.Wait()
+179 | 	})
+180 | 
+181 | 	t.Run("MultipleRequests", func(t *testing.T) {
+182 | 		var wg sync.WaitGroup
+183 | 		const numRequests = 5
+184 | 
+185 | 		// Send multiple requests concurrently
+186 | 		responses := make([]*JSONRPCResponse, numRequests)
+187 | 		errors := make([]error, numRequests)
+188 | 		mu := sync.Mutex{}
+189 | 		for i := 0; i < numRequests; i++ {
+190 | 			wg.Add(1)
+191 | 			go func(idx int) {
+192 | 				defer wg.Done()
+193 | 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+194 | 				defer cancel()
+195 | 
+196 | 				// Each request has a unique ID and payload
+197 | 				request := JSONRPCRequest{
+198 | 					JSONRPC: "2.0",
+199 | 					ID:      int64(100 + idx),
+200 | 					Method:  "debug/echo",
+201 | 					Params: map[string]interface{}{
+202 | 						"requestIndex": idx,
+203 | 						"timestamp":    time.Now().UnixNano(),
+204 | 					},
+205 | 				}
+206 | 
+207 | 				resp, err := stdio.SendRequest(ctx, request)
+208 | 				mu.Lock()
+209 | 				responses[idx] = resp
+210 | 				errors[idx] = err
+211 | 				mu.Unlock()
+212 | 			}(i)
+213 | 		}
+214 | 
+215 | 		wg.Wait()
+216 | 
+217 | 		// Check results
+218 | 		for i := 0; i < numRequests; i++ {
+219 | 			if errors[i] != nil {
+220 | 				t.Errorf("Request %d failed: %v", i, errors[i])
+221 | 				continue
+222 | 			}
+223 | 
+224 | 			if responses[i] == nil || responses[i].ID == nil || *responses[i].ID != int64(100+i) {
+225 | 				t.Errorf("Request %d: Expected ID %d, got %v", i, 100+i, responses[i])
+226 | 				continue
+227 | 			}
+228 | 
+229 | 			// Parse the result to verify echo
+230 | 			var result struct {
+231 | 				JSONRPC string                 `json:"jsonrpc"`
+232 | 				ID      int64                  `json:"id"`
+233 | 				Method  string                 `json:"method"`
+234 | 				Params  map[string]interface{} `json:"params"`
+235 | 			}
+236 | 
+237 | 			if err := json.Unmarshal(responses[i].Result, &result); err != nil {
+238 | 				t.Errorf("Request %d: Failed to unmarshal result: %v", i, err)
+239 | 				continue
+240 | 			}
+241 | 
+242 | 			// Verify data matches what was sent
+243 | 			if result.ID != int64(100+i) {
+244 | 				t.Errorf("Request %d: Expected echoed ID %d, got %d", i, 100+i, result.ID)
+245 | 			}
+246 | 
+247 | 			if result.Method != "debug/echo" {
+248 | 				t.Errorf("Request %d: Expected method 'debug/echo', got '%s'", i, result.Method)
+249 | 			}
+250 | 
+251 | 			// Verify the requestIndex parameter
+252 | 			if idx, ok := result.Params["requestIndex"].(float64); !ok || int(idx) != i {
+253 | 				t.Errorf("Request %d: Expected requestIndex %d, got %v", i, i, result.Params["requestIndex"])
+254 | 			}
+255 | 		}
+256 | 	})
+257 | 
+258 | 	t.Run("ResponseError", func(t *testing.T) {
+259 | 
+260 | 		// Prepare a request
+261 | 		request := JSONRPCRequest{
+262 | 			JSONRPC: "2.0",
+263 | 			ID:      100,
+264 | 			Method:  "debug/echo_error_string",
+265 | 		}
+266 | 
+267 | 		// The request should fail because the context is canceled
+268 | 		reps, err := stdio.SendRequest(ctx, request)
+269 | 		if err != nil {
+270 | 			t.Errorf("SendRequest failed: %v", err)
+271 | 		}
+272 | 
+273 | 		if reps.Error == nil {
+274 | 			t.Errorf("Expected error, got nil")
+275 | 		}
+276 | 
+277 | 		var responseError JSONRPCRequest
+278 | 		if err := json.Unmarshal([]byte(reps.Error.Message), &responseError); err != nil {
+279 | 			t.Errorf("Failed to unmarshal result: %v", err)
+280 | 		}
+281 | 
+282 | 		if responseError.Method != "debug/echo_error_string" {
+283 | 			t.Errorf("Expected method 'debug/echo_error_string', got '%s'", responseError.Method)
+284 | 		}
+285 | 		if responseError.ID != 100 {
+286 | 			t.Errorf("Expected ID 100, got %d", responseError.ID)
+287 | 		}
+288 | 		if responseError.JSONRPC != "2.0" {
+289 | 			t.Errorf("Expected JSONRPC '2.0', got '%s'", responseError.JSONRPC)
+290 | 		}
+291 | 	})
+292 | 
+293 | }
+294 | 
+295 | func TestStdioErrors(t *testing.T) {
+296 | 	t.Run("InvalidCommand", func(t *testing.T) {
+297 | 		// Create a new Stdio transport with a non-existent command
+298 | 		stdio := NewStdio("non_existent_command", nil)
+299 | 
+300 | 		// Start should fail
+301 | 		ctx := context.Background()
+302 | 		err := stdio.Start(ctx)
+303 | 		if err == nil {
+304 | 			t.Errorf("Expected error when starting with invalid command, got nil")
+305 | 			stdio.Close()
+306 | 		}
+307 | 	})
+308 | 
+309 | 	t.Run("RequestBeforeStart", func(t *testing.T) {
+310 | 		mockServerPath := filepath.Join(os.TempDir(), "mockstdio_server")
+311 | 		// Add .exe suffix on Windows
+312 | 		if runtime.GOOS == "windows" {
+313 | 			mockServerPath += ".exe"
+314 | 		}
+315 | 		if err := compileTestServer(mockServerPath); err != nil {
+316 | 			t.Fatalf("Failed to compile mock server: %v", err)
+317 | 		}
+318 | 		defer os.Remove(mockServerPath)
+319 | 
+320 | 		uninitiatedStdio := NewStdio(mockServerPath, nil)
+321 | 
+322 | 		// Prepare a request
+323 | 		request := JSONRPCRequest{
+324 | 			JSONRPC: "2.0",
+325 | 			ID:      99,
+326 | 			Method:  "ping",
+327 | 		}
+328 | 
+329 | 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+330 | 		defer cancel()
+331 | 		_, err := uninitiatedStdio.SendRequest(ctx, request)
+332 | 		if err == nil {
+333 | 			t.Errorf("Expected SendRequest to panic before Start(), but it didn't")
+334 | 		} else if err.Error() != "stdio client not started" {
+335 | 			t.Errorf("Expected error 'stdio client not started', got: %v", err)
+336 | 		}
+337 | 	})
+338 | 
+339 | 	t.Run("RequestAfterClose", func(t *testing.T) {
+340 | 		// Compile mock server
+341 | 		mockServerPath := filepath.Join(os.TempDir(), "mockstdio_server")
+342 | 		// Add .exe suffix on Windows
+343 | 		if runtime.GOOS == "windows" {
+344 | 			mockServerPath += ".exe"
+345 | 		}
+346 | 		if err := compileTestServer(mockServerPath); err != nil {
+347 | 			t.Fatalf("Failed to compile mock server: %v", err)
+348 | 		}
+349 | 		defer os.Remove(mockServerPath)
+350 | 
+351 | 		// Create a new Stdio transport
+352 | 		stdio := NewStdio(mockServerPath, nil)
+353 | 
+354 | 		// Start the transport
+355 | 		ctx := context.Background()
+356 | 		if err := stdio.Start(ctx); err != nil {
+357 | 			t.Fatalf("Failed to start Stdio transport: %v", err)
+358 | 		}
+359 | 
+360 | 		// Close the transport - ignore errors like "broken pipe" since the process might exit already
+361 | 		stdio.Close()
+362 | 
+363 | 		// Wait a bit to ensure process has exited
+364 | 		time.Sleep(100 * time.Millisecond)
+365 | 
+366 | 		// Try to send a request after close
+367 | 		request := JSONRPCRequest{
+368 | 			JSONRPC: "2.0",
+369 | 			ID:      1,
+370 | 			Method:  "ping",
+371 | 		}
+372 | 
+373 | 		_, err := stdio.SendRequest(ctx, request)
+374 | 		if err == nil {
+375 | 			t.Errorf("Expected error when sending request after close, got nil")
+376 | 		}
+377 | 	})
+378 | 
+379 | }
+380 | 
+
+
+--------------------------------------------------------------------------------
+/client/transport/streamable_http.go:
+--------------------------------------------------------------------------------
+  1 | package transport
+  2 | 
+  3 | import (
+  4 | 	"bufio"
+  5 | 	"bytes"
+  6 | 	"context"
+  7 | 	"encoding/json"
+  8 | 	"fmt"
+  9 | 	"io"
+ 10 | 	"net/http"
+ 11 | 	"net/url"
+ 12 | 	"strings"
+ 13 | 	"sync"
+ 14 | 	"sync/atomic"
+ 15 | 	"time"
+ 16 | 
+ 17 | 	"github.com/mark3labs/mcp-go/mcp"
+ 18 | )
+ 19 | 
+ 20 | type StreamableHTTPCOption func(*StreamableHTTP)
+ 21 | 
+ 22 | func WithHTTPHeaders(headers map[string]string) StreamableHTTPCOption {
+ 23 | 	return func(sc *StreamableHTTP) {
+ 24 | 		sc.headers = headers
+ 25 | 	}
+ 26 | }
+ 27 | 
+ 28 | // WithHTTPTimeout sets the timeout for a HTTP request and stream.
+ 29 | func WithHTTPTimeout(timeout time.Duration) StreamableHTTPCOption {
+ 30 | 	return func(sc *StreamableHTTP) {
+ 31 | 		sc.httpClient.Timeout = timeout
+ 32 | 	}
+ 33 | }
+ 34 | 
+ 35 | // StreamableHTTP implements Streamable HTTP transport.
+ 36 | //
+ 37 | // It transmits JSON-RPC messages over individual HTTP requests. One message per request.
+ 38 | // The HTTP response body can either be a single JSON-RPC response,
+ 39 | // or an upgraded SSE stream that concludes with a JSON-RPC response for the same request.
+ 40 | //
+ 41 | // https://modelcontextprotocol.io/specification/2025-03-26/basic/transports
+ 42 | //
+ 43 | // The current implementation does not support the following features:
+ 44 | //   - batching
+ 45 | //   - continuously listening for server notifications when no request is in flight
+ 46 | //     (https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#listening-for-messages-from-the-server)
+ 47 | //   - resuming stream
+ 48 | //     (https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#resumability-and-redelivery)
+ 49 | //   - server -> client request
+ 50 | type StreamableHTTP struct {
+ 51 | 	baseURL    *url.URL
+ 52 | 	httpClient *http.Client
+ 53 | 	headers    map[string]string
+ 54 | 
+ 55 | 	sessionID atomic.Value // string
+ 56 | 
+ 57 | 	notificationHandler func(mcp.JSONRPCNotification)
+ 58 | 	notifyMu            sync.RWMutex
+ 59 | 
+ 60 | 	closed chan struct{}
+ 61 | }
+ 62 | 
+ 63 | // NewStreamableHTTP creates a new Streamable HTTP transport with the given base URL.
+ 64 | // Returns an error if the URL is invalid.
+ 65 | func NewStreamableHTTP(baseURL string, options ...StreamableHTTPCOption) (*StreamableHTTP, error) {
+ 66 | 	parsedURL, err := url.Parse(baseURL)
+ 67 | 	if err != nil {
+ 68 | 		return nil, fmt.Errorf("invalid URL: %w", err)
+ 69 | 	}
+ 70 | 
+ 71 | 	smc := &StreamableHTTP{
+ 72 | 		baseURL:    parsedURL,
+ 73 | 		httpClient: &http.Client{},
+ 74 | 		headers:    make(map[string]string),
+ 75 | 		closed:     make(chan struct{}),
+ 76 | 	}
+ 77 | 	smc.sessionID.Store("") // set initial value to simplify later usage
+ 78 | 
+ 79 | 	for _, opt := range options {
+ 80 | 		opt(smc)
+ 81 | 	}
+ 82 | 
+ 83 | 	return smc, nil
+ 84 | }
+ 85 | 
+ 86 | // Start initiates the HTTP connection to the server.
+ 87 | func (c *StreamableHTTP) Start(ctx context.Context) error {
+ 88 | 	// For Streamable HTTP, we don't need to establish a persistent connection
+ 89 | 	return nil
+ 90 | }
+ 91 | 
+ 92 | // Close closes the all the HTTP connections to the server.
+ 93 | func (c *StreamableHTTP) Close() error {
+ 94 | 	select {
+ 95 | 	case <-c.closed:
+ 96 | 		return nil
+ 97 | 	default:
+ 98 | 	}
+ 99 | 	// Cancel all in-flight requests
+100 | 	close(c.closed)
+101 | 
+102 | 	sessionId := c.sessionID.Load().(string)
+103 | 	if sessionId != "" {
+104 | 		c.sessionID.Store("")
+105 | 
+106 | 		// notify server session closed
+107 | 		go func() {
+108 | 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+109 | 			defer cancel()
+110 | 			req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL.String(), nil)
+111 | 			if err != nil {
+112 | 				fmt.Printf("failed to create close request\n: %v", err)
+113 | 				return
+114 | 			}
+115 | 			req.Header.Set(headerKeySessionID, sessionId)
+116 | 			res, err := c.httpClient.Do(req)
+117 | 			if err != nil {
+118 | 				fmt.Printf("failed to send close request\n: %v", err)
+119 | 				return
+120 | 			}
+121 | 			res.Body.Close()
+122 | 		}()
+123 | 	}
+124 | 
+125 | 	return nil
+126 | }
+127 | 
+128 | const (
+129 | 	initializeMethod   = "initialize"
+130 | 	headerKeySessionID = "Mcp-Session-Id"
+131 | )
+132 | 
+133 | // sendRequest sends a JSON-RPC request to the server and waits for a response.
+134 | // Returns the raw JSON response message or an error if the request fails.
+135 | func (c *StreamableHTTP) SendRequest(
+136 | 	ctx context.Context,
+137 | 	request JSONRPCRequest,
+138 | ) (*JSONRPCResponse, error) {
+139 | 
+140 | 	// Create a combined context that could be canceled when the client is closed
+141 | 	newCtx, cancel := context.WithCancel(ctx)
+142 | 	defer cancel()
+143 | 	go func() {
+144 | 		select {
+145 | 		case <-c.closed:
+146 | 			cancel()
+147 | 		case <-newCtx.Done():
+148 | 			// The original context was canceled, no need to do anything
+149 | 		}
+150 | 	}()
+151 | 	ctx = newCtx
+152 | 
+153 | 	// Marshal request
+154 | 	requestBody, err := json.Marshal(request)
+155 | 	if err != nil {
+156 | 		return nil, fmt.Errorf("failed to marshal request: %w", err)
+157 | 	}
+158 | 
+159 | 	// Create HTTP request
+160 | 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL.String(), bytes.NewReader(requestBody))
+161 | 	if err != nil {
+162 | 		return nil, fmt.Errorf("failed to create request: %w", err)
+163 | 	}
+164 | 
+165 | 	// Set headers
+166 | 	req.Header.Set("Content-Type", "application/json")
+167 | 	req.Header.Set("Accept", "application/json, text/event-stream")
+168 | 	sessionID := c.sessionID.Load()
+169 | 	if sessionID != "" {
+170 | 		req.Header.Set(headerKeySessionID, sessionID.(string))
+171 | 	}
+172 | 	for k, v := range c.headers {
+173 | 		req.Header.Set(k, v)
+174 | 	}
+175 | 
+176 | 	// Send request
+177 | 	resp, err := c.httpClient.Do(req)
+178 | 	if err != nil {
+179 | 		return nil, fmt.Errorf("failed to send request: %w", err)
+180 | 	}
+181 | 	defer resp.Body.Close()
+182 | 
+183 | 	// Check if we got an error response
+184 | 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+185 | 		// handle session closed
+186 | 		if resp.StatusCode == http.StatusNotFound {
+187 | 			c.sessionID.CompareAndSwap(sessionID, "")
+188 | 			return nil, fmt.Errorf("session terminated (404). need to re-initialize")
+189 | 		}
+190 | 
+191 | 		// handle error response
+192 | 		var errResponse JSONRPCResponse
+193 | 		body, _ := io.ReadAll(resp.Body)
+194 | 		if err := json.Unmarshal(body, &errResponse); err == nil {
+195 | 			return &errResponse, nil
+196 | 		}
+197 | 		return nil, fmt.Errorf("request failed with status %d: %s", resp.StatusCode, body)
+198 | 	}
+199 | 
+200 | 	if request.Method == initializeMethod {
+201 | 		// saved the received session ID in the response
+202 | 		// empty session ID is allowed
+203 | 		if sessionID := resp.Header.Get(headerKeySessionID); sessionID != "" {
+204 | 			c.sessionID.Store(sessionID)
+205 | 		}
+206 | 	}
+207 | 
+208 | 	// Handle different response types
+209 | 	switch resp.Header.Get("Content-Type") {
+210 | 	case "application/json":
+211 | 		// Single response
+212 | 		var response JSONRPCResponse
+213 | 		if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+214 | 			return nil, fmt.Errorf("failed to decode response: %w", err)
+215 | 		}
+216 | 
+217 | 		// should not be a notification
+218 | 		if response.ID == nil {
+219 | 			return nil, fmt.Errorf("response should contain RPC id: %v", response)
+220 | 		}
+221 | 
+222 | 		return &response, nil
+223 | 
+224 | 	case "text/event-stream":
+225 | 		// Server is using SSE for streaming responses
+226 | 		return c.handleSSEResponse(ctx, resp.Body)
+227 | 
+228 | 	default:
+229 | 		return nil, fmt.Errorf("unexpected content type: %s", resp.Header.Get("Content-Type"))
+230 | 	}
+231 | }
+232 | 
+233 | // handleSSEResponse processes an SSE stream for a specific request.
+234 | // It returns the final result for the request once received, or an error.
+235 | func (c *StreamableHTTP) handleSSEResponse(ctx context.Context, reader io.ReadCloser) (*JSONRPCResponse, error) {
+236 | 
+237 | 	// Create a channel for this specific request
+238 | 	responseChan := make(chan *JSONRPCResponse, 1)
+239 | 
+240 | 	ctx, cancel := context.WithCancel(ctx)
+241 | 	defer cancel()
+242 | 
+243 | 	// Start a goroutine to process the SSE stream
+244 | 	go func() {
+245 | 		// only close responseChan after readingSSE()
+246 | 		defer close(responseChan)
+247 | 
+248 | 		c.readSSE(ctx, reader, func(event, data string) {
+249 | 
+250 | 			// (unsupported: batching)
+251 | 	
+252 | 			var message JSONRPCResponse
+253 | 			if err := json.Unmarshal([]byte(data), &message); err != nil {
+254 | 				fmt.Printf("failed to unmarshal message: %v\n", err)
+255 | 				return
+256 | 			}
+257 | 	
+258 | 			// Handle notification
+259 | 			if message.ID == nil {
+260 | 				var notification mcp.JSONRPCNotification
+261 | 				if err := json.Unmarshal([]byte(data), &notification); err != nil {
+262 | 					fmt.Printf("failed to unmarshal notification: %v\n", err)
+263 | 					return
+264 | 				}
+265 | 				c.notifyMu.RLock()
+266 | 				if c.notificationHandler != nil {
+267 | 					c.notificationHandler(notification)
+268 | 				}
+269 | 				c.notifyMu.RUnlock()
+270 | 				return
+271 | 			}
+272 | 	
+273 | 			responseChan <- &message
+274 | 		})
+275 | 	}()
+276 | 
+277 | 	// Wait for the response or context cancellation
+278 | 	select {
+279 | 	case response := <-responseChan:
+280 | 		if response == nil {
+281 | 			return nil, fmt.Errorf("unexpected nil response")
+282 | 		}
+283 | 		return response, nil
+284 | 	case <-ctx.Done():
+285 | 		return nil, ctx.Err()
+286 | 	}
+287 | }
+288 | 
+289 | // readSSE reads the SSE stream(reader) and calls the handler for each event and data pair.
+290 | // It will end when the reader is closed (or the context is done).
+291 | func (c *StreamableHTTP) readSSE(ctx context.Context, reader io.ReadCloser, handler func(event, data string)) {
+292 | 	defer reader.Close()
+293 | 
+294 | 	br := bufio.NewReader(reader)
+295 | 	var event, data string
+296 | 
+297 | 	for {
+298 | 		select {
+299 | 		case <-ctx.Done():
+300 | 			return
+301 | 		default:
+302 | 			line, err := br.ReadString('\n')
+303 | 			if err != nil {
+304 | 				if err == io.EOF {
+305 | 					// Process any pending event before exit
+306 | 					if event != "" && data != "" {
+307 | 						handler(event, data)
+308 | 					}
+309 | 					return
+310 | 				}
+311 | 				select {
+312 | 				case <-ctx.Done():
+313 | 					return
+314 | 				default:
+315 | 					fmt.Printf("SSE stream error: %v\n", err)
+316 | 					return
+317 | 				}
+318 | 			}
+319 | 
+320 | 			// Remove only newline markers
+321 | 			line = strings.TrimRight(line, "\r\n")
+322 | 			if line == "" {
+323 | 				// Empty line means end of event
+324 | 				if event != "" && data != "" {
+325 | 					handler(event, data)
+326 | 					event = ""
+327 | 					data = ""
+328 | 				}
+329 | 				continue
+330 | 			}
+331 | 
+332 | 			if strings.HasPrefix(line, "event:") {
+333 | 				event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+334 | 			} else if strings.HasPrefix(line, "data:") {
+335 | 				data = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+336 | 			}
+337 | 		}
+338 | 	}
+339 | }
+340 | 
+341 | func (c *StreamableHTTP) SendNotification(ctx context.Context, notification mcp.JSONRPCNotification) error {
+342 | 
+343 | 	// Marshal request
+344 | 	requestBody, err := json.Marshal(notification)
+345 | 	if err != nil {
+346 | 		return fmt.Errorf("failed to marshal notification: %w", err)
+347 | 	}
+348 | 
+349 | 	// Create HTTP request
+350 | 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL.String(), bytes.NewReader(requestBody))
+351 | 	if err != nil {
+352 | 		return fmt.Errorf("failed to create request: %w", err)
+353 | 	}
+354 | 
+355 | 	// Set headers
+356 | 	req.Header.Set("Content-Type", "application/json")
+357 | 	if sessionID := c.sessionID.Load(); sessionID != "" {
+358 | 		req.Header.Set(headerKeySessionID, sessionID.(string))
+359 | 	}
+360 | 	for k, v := range c.headers {
+361 | 		req.Header.Set(k, v)
+362 | 	}
+363 | 
+364 | 	// Send request
+365 | 	resp, err := c.httpClient.Do(req)
+366 | 	if err != nil {
+367 | 		return fmt.Errorf("failed to send request: %w", err)
+368 | 	}
+369 | 	defer resp.Body.Close()
+370 | 
+371 | 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+372 | 		body, _ := io.ReadAll(resp.Body)
+373 | 		return fmt.Errorf(
+374 | 			"notification failed with status %d: %s",
+375 | 			resp.StatusCode,
+376 | 			body,
+377 | 		)
+378 | 	}
+379 | 
+380 | 	return nil
+381 | }
+382 | 
+383 | func (c *StreamableHTTP) SetNotificationHandler(handler func(mcp.JSONRPCNotification)) {
+384 | 	c.notifyMu.Lock()
+385 | 	defer c.notifyMu.Unlock()
+386 | 	c.notificationHandler = handler
+387 | }
+388 | 
+389 | func (c *StreamableHTTP) GetSessionId() string {
+390 | 	return c.sessionID.Load().(string)
+391 | }
+392 | 
+
+
+--------------------------------------------------------------------------------
+/client/transport/streamable_http_test.go:
+--------------------------------------------------------------------------------
+  1 | package transport
+  2 | 
+  3 | import (
+  4 | 	"context"
+  5 | 	"encoding/json"
+  6 | 	"errors"
+  7 | 	"fmt"
+  8 | 	"net/http"
+  9 | 	"net/http/httptest"
+ 10 | 	"sync"
+ 11 | 	"testing"
+ 12 | 	"time"
+ 13 | 
+ 14 | 	"github.com/mark3labs/mcp-go/mcp"
+ 15 | )
+ 16 | 
+ 17 | // startMockStreamableHTTPServer starts a test HTTP server that implements
+ 18 | // a minimal Streamable HTTP server for testing purposes.
+ 19 | // It returns the server URL and a function to close the server.
+ 20 | func startMockStreamableHTTPServer() (string, func()) {
+ 21 | 	var sessionID string
+ 22 | 	var mu sync.Mutex
+ 23 | 
+ 24 | 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 25 | 		// Handle only POST requests
+ 26 | 		if r.Method != http.MethodPost {
+ 27 | 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+ 28 | 			return
+ 29 | 		}
+ 30 | 
+ 31 | 		// Parse incoming JSON-RPC request
+ 32 | 		var request map[string]any
+ 33 | 		decoder := json.NewDecoder(r.Body)
+ 34 | 		if err := decoder.Decode(&request); err != nil {
+ 35 | 			http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+ 36 | 			return
+ 37 | 		}
+ 38 | 
+ 39 | 		method := request["method"]
+ 40 | 		switch method {
+ 41 | 		case "initialize":
+ 42 | 			// Generate a new session ID
+ 43 | 			mu.Lock()
+ 44 | 			sessionID = fmt.Sprintf("test-session-%d", time.Now().UnixNano())
+ 45 | 			mu.Unlock()
+ 46 | 			w.Header().Set("Mcp-Session-Id", sessionID)
+ 47 | 			w.Header().Set("Content-Type", "application/json")
+ 48 | 			w.WriteHeader(http.StatusAccepted)
+ 49 | 			json.NewEncoder(w).Encode(map[string]interface{}{
+ 50 | 				"jsonrpc": "2.0",
+ 51 | 				"id":      request["id"],
+ 52 | 				"result":  "initialized",
+ 53 | 			})
+ 54 | 
+ 55 | 		case "debug/echo":
+ 56 | 			// Check session ID
+ 57 | 			if r.Header.Get("Mcp-Session-Id") != sessionID {
+ 58 | 				http.Error(w, "Invalid session ID", http.StatusNotFound)
+ 59 | 				return
+ 60 | 			}
+ 61 | 
+ 62 | 			// Echo back the request as the response result
+ 63 | 			w.Header().Set("Content-Type", "application/json")
+ 64 | 			w.WriteHeader(http.StatusOK)
+ 65 | 			json.NewEncoder(w).Encode(map[string]interface{}{
+ 66 | 				"jsonrpc": "2.0",
+ 67 | 				"id":      request["id"],
+ 68 | 				"result":  request,
+ 69 | 			})
+ 70 | 
+ 71 | 		case "debug/echo_notification":
+ 72 | 			// Check session ID
+ 73 | 			if r.Header.Get("Mcp-Session-Id") != sessionID {
+ 74 | 				http.Error(w, "Invalid session ID", http.StatusNotFound)
+ 75 | 				return
+ 76 | 			}
+ 77 | 
+ 78 | 			// Send response and notification
+ 79 | 			w.Header().Set("Content-Type", "text/event-stream")
+ 80 | 			w.WriteHeader(http.StatusOK)
+ 81 | 			notification := map[string]any{
+ 82 | 				"jsonrpc": "2.0",
+ 83 | 				"method":  "debug/test",
+ 84 | 				"params":  request,
+ 85 | 			}
+ 86 | 			notificationData, _ := json.Marshal(notification)
+ 87 | 			fmt.Fprintf(w, "event: message\ndata: %s\n\n", notificationData)
+ 88 | 			response := map[string]any{
+ 89 | 				"jsonrpc": "2.0",
+ 90 | 				"id":      request["id"],
+ 91 | 				"result":  request,
+ 92 | 			}
+ 93 | 			responseData, _ := json.Marshal(response)
+ 94 | 			fmt.Fprintf(w, "event: message\ndata: %s\n\n", responseData)
+ 95 | 
+ 96 | 		case "debug/echo_error_string":
+ 97 | 			// Check session ID
+ 98 | 			if r.Header.Get("Mcp-Session-Id") != sessionID {
+ 99 | 				http.Error(w, "Invalid session ID", http.StatusNotFound)
+100 | 				return
+101 | 			}
+102 | 
+103 | 			// Return an error response
+104 | 			w.Header().Set("Content-Type", "application/json")
+105 | 			w.WriteHeader(http.StatusOK)
+106 | 			data, _ := json.Marshal(request)
+107 | 			json.NewEncoder(w).Encode(map[string]interface{}{
+108 | 				"jsonrpc": "2.0",
+109 | 				"id":      request["id"],
+110 | 				"error": map[string]interface{}{
+111 | 					"code":    -1,
+112 | 					"message": string(data),
+113 | 				},
+114 | 			})
 115 | 		}
 116 | 	})
 117 | 
-118 | 	t.Run("ReadResource", func(t *testing.T) {
-119 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-120 | 		defer cancel()
-121 | 
-122 | 		request := mcp.ReadResourceRequest{}
-123 | 		request.Params.URI = "test://resource"
-124 | 
-125 | 		result, err := client.ReadResource(ctx, request)
-126 | 		if err != nil {
-127 | 			t.Errorf("ReadResource failed: %v", err)
-128 | 		}
-129 | 
-130 | 		if len(result.Contents) != 1 {
-131 | 			t.Errorf("Expected 1 content item, got %d", len(result.Contents))
-132 | 		}
-133 | 	})
+118 | 	// Start test server
+119 | 	testServer := httptest.NewServer(handler)
+120 | 	return testServer.URL, testServer.Close
+121 | }
+122 | 
+123 | func TestStreamableHTTP(t *testing.T) {
+124 | 	// Start mock server
+125 | 	url, closeF := startMockStreamableHTTPServer()
+126 | 	defer closeF()
+127 | 
+128 | 	// Create transport
+129 | 	trans, err := NewStreamableHTTP(url)
+130 | 	if err != nil {
+131 | 		t.Fatal(err)
+132 | 	}
+133 | 	defer trans.Close()
 134 | 
-135 | 	t.Run("Subscribe and Unsubscribe", func(t *testing.T) {
-136 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-137 | 		defer cancel()
+135 | 	// Initialize the transport first
+136 | 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+137 | 	defer cancel()
 138 | 
-139 | 		// Test Subscribe
-140 | 		subRequest := mcp.SubscribeRequest{}
-141 | 		subRequest.Params.URI = "test://resource"
-142 | 		err := client.Subscribe(ctx, subRequest)
-143 | 		if err != nil {
-144 | 			t.Errorf("Subscribe failed: %v", err)
-145 | 		}
-146 | 
-147 | 		// Test Unsubscribe
-148 | 		unsubRequest := mcp.UnsubscribeRequest{}
-149 | 		unsubRequest.Params.URI = "test://resource"
-150 | 		err = client.Unsubscribe(ctx, unsubRequest)
-151 | 		if err != nil {
-152 | 			t.Errorf("Unsubscribe failed: %v", err)
-153 | 		}
-154 | 	})
-155 | 
-156 | 	t.Run("ListPrompts", func(t *testing.T) {
-157 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-158 | 		defer cancel()
+139 | 	initRequest := JSONRPCRequest{
+140 | 		JSONRPC: "2.0",
+141 | 		ID:      1,
+142 | 		Method:  "initialize",
+143 | 	}
+144 | 
+145 | 	_, err = trans.SendRequest(ctx, initRequest)
+146 | 	if err != nil {
+147 | 		t.Fatal(err)
+148 | 	}
+149 | 
+150 | 	// Now run the tests
+151 | 	t.Run("SendRequest", func(t *testing.T) {
+152 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+153 | 		defer cancel()
+154 | 
+155 | 		params := map[string]interface{}{
+156 | 			"string": "hello world",
+157 | 			"array":  []interface{}{1, 2, 3},
+158 | 		}
 159 | 
-160 | 		request := mcp.ListPromptsRequest{}
-161 | 		result, err := client.ListPrompts(ctx, request)
-162 | 		if err != nil {
-163 | 			t.Errorf("ListPrompts failed: %v", err)
-164 | 		}
-165 | 
-166 | 		if len(result.Prompts) != 1 {
-167 | 			t.Errorf("Expected 1 prompt, got %d", len(result.Prompts))
-168 | 		}
-169 | 	})
-170 | 
-171 | 	t.Run("GetPrompt", func(t *testing.T) {
-172 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-173 | 		defer cancel()
-174 | 
-175 | 		request := mcp.GetPromptRequest{}
-176 | 		request.Params.Name = "test-prompt"
-177 | 
-178 | 		result, err := client.GetPrompt(ctx, request)
-179 | 		if err != nil {
-180 | 			t.Errorf("GetPrompt failed: %v", err)
-181 | 		}
-182 | 
-183 | 		if len(result.Messages) != 1 {
-184 | 			t.Errorf("Expected 1 message, got %d", len(result.Messages))
-185 | 		}
-186 | 	})
-187 | 
-188 | 	t.Run("ListTools", func(t *testing.T) {
-189 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-190 | 		defer cancel()
-191 | 
-192 | 		request := mcp.ListToolsRequest{}
-193 | 		result, err := client.ListTools(ctx, request)
-194 | 		if err != nil {
-195 | 			t.Errorf("ListTools failed: %v", err)
-196 | 		}
-197 | 
-198 | 		if len(result.Tools) != 1 {
-199 | 			t.Errorf("Expected 1 tool, got %d", len(result.Tools))
-200 | 		}
-201 | 	})
-202 | 
-203 | 	t.Run("CallTool", func(t *testing.T) {
-204 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-205 | 		defer cancel()
-206 | 
-207 | 		request := mcp.CallToolRequest{}
-208 | 		request.Params.Name = "test-tool"
-209 | 		request.Params.Arguments = map[string]interface{}{
-210 | 			"param1": "value1",
-211 | 		}
-212 | 
-213 | 		result, err := client.CallTool(ctx, request)
-214 | 		if err != nil {
-215 | 			t.Errorf("CallTool failed: %v", err)
-216 | 		}
-217 | 
-218 | 		if len(result.Content) != 1 {
-219 | 			t.Errorf("Expected 1 content item, got %d", len(result.Content))
-220 | 		}
-221 | 	})
-222 | 
-223 | 	t.Run("SetLevel", func(t *testing.T) {
-224 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-225 | 		defer cancel()
-226 | 
-227 | 		request := mcp.SetLevelRequest{}
-228 | 		request.Params.Level = mcp.LoggingLevelInfo
+160 | 		request := JSONRPCRequest{
+161 | 			JSONRPC: "2.0",
+162 | 			ID:      1,
+163 | 			Method:  "debug/echo",
+164 | 			Params:  params,
+165 | 		}
+166 | 
+167 | 		// Send the request
+168 | 		response, err := trans.SendRequest(ctx, request)
+169 | 		if err != nil {
+170 | 			t.Fatalf("SendRequest failed: %v", err)
+171 | 		}
+172 | 
+173 | 		// Parse the result to verify echo
+174 | 		var result struct {
+175 | 			JSONRPC string                 `json:"jsonrpc"`
+176 | 			ID      int64                  `json:"id"`
+177 | 			Method  string                 `json:"method"`
+178 | 			Params  map[string]interface{} `json:"params"`
+179 | 		}
+180 | 
+181 | 		if err := json.Unmarshal(response.Result, &result); err != nil {
+182 | 			t.Fatalf("Failed to unmarshal result: %v", err)
+183 | 		}
+184 | 
+185 | 		// Verify response data matches what was sent
+186 | 		if result.JSONRPC != "2.0" {
+187 | 			t.Errorf("Expected JSONRPC value '2.0', got '%s'", result.JSONRPC)
+188 | 		}
+189 | 		if result.ID != 1 {
+190 | 			t.Errorf("Expected ID 1, got %d", result.ID)
+191 | 		}
+192 | 		if result.Method != "debug/echo" {
+193 | 			t.Errorf("Expected method 'debug/echo', got '%s'", result.Method)
+194 | 		}
+195 | 
+196 | 		if str, ok := result.Params["string"].(string); !ok || str != "hello world" {
+197 | 			t.Errorf("Expected string 'hello world', got %v", result.Params["string"])
+198 | 		}
+199 | 
+200 | 		if arr, ok := result.Params["array"].([]interface{}); !ok || len(arr) != 3 {
+201 | 			t.Errorf("Expected array with 3 items, got %v", result.Params["array"])
+202 | 		}
+203 | 	})
+204 | 
+205 | 	t.Run("SendRequestWithTimeout", func(t *testing.T) {
+206 | 		// Create a context that's already canceled
+207 | 		ctx, cancel := context.WithCancel(context.Background())
+208 | 		cancel() // Cancel the context immediately
+209 | 
+210 | 		// Prepare a request
+211 | 		request := JSONRPCRequest{
+212 | 			JSONRPC: "2.0",
+213 | 			ID:      3,
+214 | 			Method:  "debug/echo",
+215 | 		}
+216 | 
+217 | 		// The request should fail because the context is canceled
+218 | 		_, err := trans.SendRequest(ctx, request)
+219 | 		if err == nil {
+220 | 			t.Errorf("Expected context canceled error, got nil")
+221 | 		} else if !errors.Is(err, context.Canceled) {
+222 | 			t.Errorf("Expected context.Canceled error, got: %v", err)
+223 | 		}
+224 | 	})
+225 | 
+226 | 	t.Run("SendNotification & NotificationHandler", func(t *testing.T) {
+227 | 		var wg sync.WaitGroup
+228 | 		notificationChan := make(chan mcp.JSONRPCNotification, 1)
 229 | 
-230 | 		err := client.SetLevel(ctx, request)
-231 | 		if err != nil {
-232 | 			t.Errorf("SetLevel failed: %v", err)
-233 | 		}
-234 | 	})
-235 | 
-236 | 	t.Run("Complete", func(t *testing.T) {
-237 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-238 | 		defer cancel()
-239 | 
-240 | 		request := mcp.CompleteRequest{}
-241 | 		request.Params.Ref = mcp.PromptReference{
-242 | 			Type: "ref/prompt",
-243 | 			Name: "test-prompt",
-244 | 		}
-245 | 		request.Params.Argument.Name = "test-arg"
-246 | 		request.Params.Argument.Value = "test-value"
-247 | 
-248 | 		result, err := client.Complete(ctx, request)
-249 | 		if err != nil {
-250 | 			t.Errorf("Complete failed: %v", err)
-251 | 		}
-252 | 
-253 | 		if len(result.Completion.Values) != 1 {
-254 | 			t.Errorf(
-255 | 				"Expected 1 completion value, got %d",
-256 | 				len(result.Completion.Values),
-257 | 			)
-258 | 		}
-259 | 	})
-260 | 
-261 | 	client.Close()
-262 | 	wg.Wait()
+230 | 		// Set notification handler
+231 | 		trans.SetNotificationHandler(func(notification mcp.JSONRPCNotification) {
+232 | 			notificationChan <- notification
+233 | 		})
+234 | 
+235 | 		// Send a request that triggers a notification
+236 | 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+237 | 		defer cancel()
+238 | 
+239 | 		request := JSONRPCRequest{
+240 | 			JSONRPC: "2.0",
+241 | 			ID:      1,
+242 | 			Method:  "debug/echo_notification",
+243 | 		}
+244 | 
+245 | 		_, err := trans.SendRequest(ctx, request)
+246 | 		if err != nil {
+247 | 			t.Fatalf("SendRequest failed: %v", err)
+248 | 		}
+249 | 
+250 | 		wg.Add(1)
+251 | 		go func() {
+252 | 			defer wg.Done()
+253 | 			select {
+254 | 			case notification := <-notificationChan:
+255 | 				// We received a notification
+256 | 				got := notification.Params.AdditionalFields
+257 | 				if got == nil {
+258 | 					t.Errorf("Notification handler did not send the expected notification: got nil")
+259 | 				}
+260 | 				if int64(got["id"].(float64)) != request.ID ||
+261 | 					got["jsonrpc"] != request.JSONRPC ||
+262 | 					got["method"] != request.Method {
 263 | 
-264 | 	t.Run("CheckLogs", func(t *testing.T) {
-265 | 		logRecordsMu.RLock()
-266 | 		defer logRecordsMu.RUnlock()
-267 | 
-268 | 		if len(logRecords) != 1 {
-269 | 			t.Errorf("Expected 1 log record, got %d", len(logRecords))
-270 | 			return
-271 | 		}
-272 | 
-273 | 		msg, ok := logRecords[0][slog.MessageKey].(string)
-274 | 		if !ok {
-275 | 			t.Errorf("Expected log record to have message key")
-276 | 		}
-277 | 		if msg != "launch successful" {
-278 | 			t.Errorf("Expected log message 'launch successful', got '%s'", msg)
-279 | 		}
-280 | 	})
-281 | }
-282 | 
-
-
---------------------------------------------------------------------------------
-/client/types.go:
---------------------------------------------------------------------------------
-1 | package client
-2 | 
-3 | import "encoding/json"
-4 | 
-5 | type RPCResponse struct {
-6 | 	Error    *string
-7 | 	Response *json.RawMessage
-8 | }
-9 | 
+264 | 					responseJson, _ := json.Marshal(got)
+265 | 					requestJson, _ := json.Marshal(request)
+266 | 					t.Errorf("Notification handler did not send the expected notification: \ngot %s\nexpect %s", responseJson, requestJson)
+267 | 				}
+268 | 
+269 | 			case <-time.After(1 * time.Second):
+270 | 				t.Errorf("Expected notification, got none")
+271 | 			}
+272 | 		}()
+273 | 
+274 | 		wg.Wait()
+275 | 	})
+276 | 
+277 | 	t.Run("MultipleRequests", func(t *testing.T) {
+278 | 		var wg sync.WaitGroup
+279 | 		const numRequests = 5
+280 | 
+281 | 		// Send multiple requests concurrently
+282 | 		mu := sync.Mutex{}
+283 | 		responses := make([]*JSONRPCResponse, numRequests)
+284 | 		errors := make([]error, numRequests)
+285 | 
+286 | 		for i := 0; i < numRequests; i++ {
+287 | 			wg.Add(1)
+288 | 			go func(idx int) {
+289 | 				defer wg.Done()
+290 | 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+291 | 				defer cancel()
+292 | 
+293 | 				// Each request has a unique ID and payload
+294 | 				request := JSONRPCRequest{
+295 | 					JSONRPC: "2.0",
+296 | 					ID:      int64(100 + idx),
+297 | 					Method:  "debug/echo",
+298 | 					Params: map[string]interface{}{
+299 | 						"requestIndex": idx,
+300 | 						"timestamp":    time.Now().UnixNano(),
+301 | 					},
+302 | 				}
+303 | 
+304 | 				resp, err := trans.SendRequest(ctx, request)
+305 | 				mu.Lock()
+306 | 				responses[idx] = resp
+307 | 				errors[idx] = err
+308 | 				mu.Unlock()
+309 | 			}(i)
+310 | 		}
+311 | 
+312 | 		wg.Wait()
+313 | 
+314 | 		// Check results
+315 | 		for i := 0; i < numRequests; i++ {
+316 | 			if errors[i] != nil {
+317 | 				t.Errorf("Request %d failed: %v", i, errors[i])
+318 | 				continue
+319 | 			}
+320 | 
+321 | 			if responses[i] == nil || responses[i].ID == nil || *responses[i].ID != int64(100+i) {
+322 | 				t.Errorf("Request %d: Expected ID %d, got %v", i, 100+i, responses[i])
+323 | 				continue
+324 | 			}
+325 | 
+326 | 			// Parse the result to verify echo
+327 | 			var result struct {
+328 | 				JSONRPC string                 `json:"jsonrpc"`
+329 | 				ID      int64                  `json:"id"`
+330 | 				Method  string                 `json:"method"`
+331 | 				Params  map[string]interface{} `json:"params"`
+332 | 			}
+333 | 
+334 | 			if err := json.Unmarshal(responses[i].Result, &result); err != nil {
+335 | 				t.Errorf("Request %d: Failed to unmarshal result: %v", i, err)
+336 | 				continue
+337 | 			}
+338 | 
+339 | 			// Verify data matches what was sent
+340 | 			if result.ID != int64(100+i) {
+341 | 				t.Errorf("Request %d: Expected echoed ID %d, got %d", i, 100+i, result.ID)
+342 | 			}
+343 | 
+344 | 			if result.Method != "debug/echo" {
+345 | 				t.Errorf("Request %d: Expected method 'debug/echo', got '%s'", i, result.Method)
+346 | 			}
+347 | 
+348 | 			// Verify the requestIndex parameter
+349 | 			if idx, ok := result.Params["requestIndex"].(float64); !ok || int(idx) != i {
+350 | 				t.Errorf("Request %d: Expected requestIndex %d, got %v", i, i, result.Params["requestIndex"])
+351 | 			}
+352 | 		}
+353 | 	})
+354 | 
+355 | 	t.Run("ResponseError", func(t *testing.T) {
+356 | 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+357 | 		defer cancel()
+358 | 
+359 | 		// Prepare a request
+360 | 		request := JSONRPCRequest{
+361 | 			JSONRPC: "2.0",
+362 | 			ID:      100,
+363 | 			Method:  "debug/echo_error_string",
+364 | 		}
+365 | 
+366 | 		reps, err := trans.SendRequest(ctx, request)
+367 | 		if err != nil {
+368 | 			t.Errorf("SendRequest failed: %v", err)
+369 | 		}
+370 | 
+371 | 		if reps.Error == nil {
+372 | 			t.Errorf("Expected error, got nil")
+373 | 		}
+374 | 
+375 | 		var responseError JSONRPCRequest
+376 | 		if err := json.Unmarshal([]byte(reps.Error.Message), &responseError); err != nil {
+377 | 			t.Errorf("Failed to unmarshal result: %v", err)
+378 | 			return
+379 | 		}
+380 | 
+381 | 		if responseError.Method != "debug/echo_error_string" {
+382 | 			t.Errorf("Expected method 'debug/echo_error_string', got '%s'", responseError.Method)
+383 | 		}
+384 | 		if responseError.ID != 100 {
+385 | 			t.Errorf("Expected ID 100, got %d", responseError.ID)
+386 | 		}
+387 | 		if responseError.JSONRPC != "2.0" {
+388 | 			t.Errorf("Expected JSONRPC '2.0', got '%s'", responseError.JSONRPC)
+389 | 		}
+390 | 	})
+391 | }
+392 | 
+393 | func TestStreamableHTTPErrors(t *testing.T) {
+394 | 	t.Run("InvalidURL", func(t *testing.T) {
+395 | 		// Create a new StreamableHTTP transport with an invalid URL
+396 | 		_, err := NewStreamableHTTP("://invalid-url")
+397 | 		if err == nil {
+398 | 			t.Errorf("Expected error when creating with invalid URL, got nil")
+399 | 		}
+400 | 	})
+401 | 
+402 | 	t.Run("NonExistentURL", func(t *testing.T) {
+403 | 		// Create a new StreamableHTTP transport with a non-existent URL
+404 | 		trans, err := NewStreamableHTTP("http://localhost:1")
+405 | 		if err != nil {
+406 | 			t.Fatalf("Failed to create StreamableHTTP transport: %v", err)
+407 | 		}
+408 | 
+409 | 		// Send request should fail
+410 | 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+411 | 		defer cancel()
+412 | 
+413 | 		request := JSONRPCRequest{
+414 | 			JSONRPC: "2.0",
+415 | 			ID:      1,
+416 | 			Method:  "initialize",
+417 | 		}
+418 | 
+419 | 		_, err = trans.SendRequest(ctx, request)
+420 | 		if err == nil {
+421 | 			t.Errorf("Expected error when sending request to non-existent URL, got nil")
+422 | 		}
+423 | 	})
+424 | 
+425 | }
+426 | 
 
 
 --------------------------------------------------------------------------------

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/tmc/langchaingo/llms"
 	"github.com/tmc/langchaingo/tools"
@@ -272,7 +273,7 @@ func (c *MultiServerMCPClient) connectToServerViaSSE(ctx context.Context, server
 		config.SSEReadTimeout = DefaultSSEReadTimeout
 	}
 
-	opts := []client.ClientOption{
+	opts := []transport.ClientOption{
 		client.WithHeaders(config.Headers),
 		// Note: mcp-go SSE client doesn't have a direct HTTP timeout option during creation,
 		// but the underlying http client might respect context deadlines.
