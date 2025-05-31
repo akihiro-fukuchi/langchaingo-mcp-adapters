@@ -5,6 +5,7 @@ go 1.24.1
 require (
 	github.com/mark3labs/mcp-go v0.23.1
 	github.com/ovechkin-dm/mockio v1.0.2
+	github.com/ovechkin-dm/mockio/v2 v2.0.1
 	github.com/stretchr/testify v1.10.0
 	github.com/tmc/langchaingo v0.1.13
 	golang.org/x/sync v0.13.0
@@ -27,7 +28,7 @@ require (
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/nikolalohinski/gonja v1.5.3 // indirect
-	github.com/ovechkin-dm/go-dyno v0.5.1 // indirect
+	github.com/ovechkin-dm/go-dyno v0.5.2 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/petermattis/goid v0.0.0-20250319124200-ccd6737f222a // indirect
 	github.com/pkg/errors v0.9.1 // indirect
