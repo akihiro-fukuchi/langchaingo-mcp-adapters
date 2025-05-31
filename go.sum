@@ -132,8 +132,11 @@ github.com/onsi/ginkgo v1.8.0/go.mod h1:lLunBs/Ym6LB5Z9jYTR76FiuTmxDTDusOGeTQH+W
 github.com/onsi/gomega v1.5.0/go.mod h1:ex+gbHU/CVuBBDIJjb2X0qEXbFg53c61hWP/1CpauHY=
 github.com/ovechkin-dm/go-dyno v0.5.1 h1:hOi36gKwv1GyDHtWD46uq1xL8H7pU/qSgJabmVT0d78=
 github.com/ovechkin-dm/go-dyno v0.5.1/go.mod h1:CcJNuo7AbePMoRNpM3i1jC1Rp9kHEMyWozNdWzR+0ys=
+github.com/ovechkin-dm/go-dyno v0.5.2 h1:E0YtEtMjW7kE0JgZINQ3Nb2Zr9Iuoi48/c97/A80eqs=
+github.com/ovechkin-dm/go-dyno v0.5.2/go.mod h1:CcJNuo7AbePMoRNpM3i1jC1Rp9kHEMyWozNdWzR+0ys=
 github.com/ovechkin-dm/mockio v1.0.2 h1:AR31nVoWhZeMDe9FnfFfayof/y9ed3HASIVhqVKyl8M=
 github.com/ovechkin-dm/mockio v1.0.2/go.mod h1:TAmLa+rztm8IKxrc44JPAviGEhRzNeIyF9oiFznMcCo=
+github.com/ovechkin-dm/mockio/v2 v2.0.1/go.mod h1:vaAxP0kNfgbyo8c/dLcx9SQn8scNPcljYZ3P1goPpz4=
 github.com/pelletier/go-toml/v2 v2.2.4 h1:mye9XuhQ6gvn5h28+VilKrrPoQVanw5PMw/TB0t5Ec4=
 github.com/pelletier/go-toml/v2 v2.2.4/go.mod h1:2gIqNv+qfxSVS7cM2xJQKtLSTLUE9V8t9Stt+h56mCY=
 github.com/petermattis/goid v0.0.0-20250319124200-ccd6737f222a h1:S+AGcmAESQ0pXCUNnRH7V+bOUIgkSX5qVt2cNKCrm0Q=
