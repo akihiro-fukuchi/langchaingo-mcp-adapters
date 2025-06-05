@@ -7,7 +7,7 @@ require (
 	github.com/ovechkin-dm/mockio v1.0.2
 	github.com/stretchr/testify v1.10.0
 	github.com/tmc/langchaingo v0.1.13
-	golang.org/x/sync v0.13.0
+	golang.org/x/sync v0.15.0
 )
 
 require (
