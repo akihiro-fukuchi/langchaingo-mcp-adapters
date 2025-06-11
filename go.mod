@@ -3,7 +3,7 @@ module github.com/akihiro-fukuchi/langchaingo-mcp-adapters
 go 1.24.1
 
 require (
-	github.com/mark3labs/mcp-go v0.23.1
+	github.com/mark3labs/mcp-go v0.32.0
 	github.com/ovechkin-dm/mockio v1.0.2
 	github.com/stretchr/testify v1.10.0
 	github.com/tmc/langchaingo v0.1.13
