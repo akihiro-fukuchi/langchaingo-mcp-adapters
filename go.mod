@@ -1,11 +1,11 @@
 module github.com/akihiro-fukuchi/langchaingo-mcp-adapters
 
-go 1.24.1
+go 1.25.5
 
 require (
-	github.com/mark3labs/mcp-go v0.23.1
+	github.com/mark3labs/mcp-go v0.58.0
 	github.com/ovechkin-dm/mockio v1.0.2
-	github.com/stretchr/testify v1.10.0
+	github.com/stretchr/testify v1.11.1
 	github.com/tmc/langchaingo v0.1.13
 	golang.org/x/sync v0.13.0
 )
@@ -18,6 +18,7 @@ require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dlclark/regexp2 v1.11.5 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/goph/emperror v0.17.2 // indirect
 	github.com/huandu/xstrings v1.5.0 // indirect
@@ -33,6 +34,7 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pkoukk/tiktoken-go v0.1.7 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/spf13/cast v1.7.1 // indirect
@@ -43,5 +45,6 @@ require (
 	golang.org/x/crypto v0.37.0 // indirect
 	golang.org/x/exp v0.0.0-20250408133849-7e4ce0ab07d0 // indirect
 	golang.org/x/sys v0.32.0 // indirect
+	golang.org/x/text v0.24.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
